@@ -1,11 +1,10 @@
 "use client";
 
-// NOTE on storage: the queue is kept in this browser's localStorage only.
-// It is NOT shared between people or devices. To share one queue across the
-// syndicate, replace loadBets/saveBets with calls to a shared database
-// (e.g. Vercel Postgres or Supabase) via API routes under app/api/. See README.md.
+// Storage: the queue lives in the shared database behind /api/bets (polled every 10s).
+// If the API reports that no database is configured (503), the queue falls back to this
+// browser's localStorage and a banner says so. See README.md.
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   type Bet,
   type BetStatus,
@@ -40,6 +39,20 @@ function saveBets(bets: Bet[]) {
   }
 }
 
+const POLL_MS = 10_000;
+
+type Mode = "unknown" | "shared" | "local";
+
+async function errorMessage(res: Response): Promise<string> {
+  try {
+    const data = (await res.json()) as { message?: string };
+    if (data.message) return data.message;
+  } catch {
+    // fall through
+  }
+  return `Request failed (${res.status}).`;
+}
+
 const emptyForm = { event: "", market: "", selection: "", odds: "", stake: "", notes: "", proposedBy: "" };
 
 const STATUS_STYLE: Record<BetStatus, string> = {
@@ -53,7 +66,8 @@ const STATUS_STYLE: Record<BetStatus, string> = {
 
 export default function BetQueue() {
   const [bets, setBets] = useState<Bet[]>([]);
-  const [loaded, setLoaded] = useState(false);
+  const [mode, setMode] = useState<Mode>("unknown");
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [form, setForm] = useState(emptyForm);
   const [formError, setFormError] = useState<string | null>(null);
   const [filter, setFilter] = useState<BetStatus | "all">("all");
@@ -61,17 +75,39 @@ export default function BetQueue() {
   const [placeForm, setPlaceForm] = useState({ odds: "", stake: "" });
   const [notice, setNotice] = useState<string | null>(null);
 
-  // Load after mount so server and client render the same HTML.
+  // Fetch the shared queue. A 503 means no database is configured: keep the local queue instead.
+  const refresh = useCallback(async () => {
+    try {
+      const res = await fetch("/api/bets", { cache: "no-store" });
+      if (res.status === 503) {
+        setMode("local");
+        setLoadError(null);
+        return;
+      }
+      if (!res.ok) throw new Error(await errorMessage(res));
+      const data = (await res.json()) as { bets: Bet[] };
+      setBets(data.bets);
+      setMode("shared");
+      setLoadError(null);
+    } catch (err) {
+      setLoadError(err instanceof Error ? `Could not load the queue: ${err.message}` : "Could not load the queue.");
+    }
+  }, []);
+
+  // On mount: seed from this browser's copy (used only if the database is not configured), then poll.
   useEffect(() => {
     // Reading localStorage must happen after mount (it is not available on the server).
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setBets(loadBets());
-    setLoaded(true);
-  }, []);
+    refresh();
+    const timer = window.setInterval(refresh, POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [refresh]);
 
+  // Only the local fallback writes to localStorage.
   useEffect(() => {
-    if (loaded) saveBets(bets);
-  }, [bets, loaded]);
+    if (mode === "local") saveBets(bets);
+  }, [bets, mode]);
 
   const counts = useMemo(() => {
     const c: Record<string, number> = { all: bets.length };
@@ -87,11 +123,31 @@ export default function BetQueue() {
     [bets, filter],
   );
 
+  // Local fallback only.
   function update(id: string, patch: Partial<Bet>) {
     setBets((prev) => prev.map((b) => (b.id === id ? { ...b, ...patch } : b)));
   }
 
-  function submitProposal(e: React.FormEvent) {
+  // Apply a status/placed/settled change: via the API when shared, locally otherwise.
+  async function changeBet(bet: Bet, patch: Partial<Bet>) {
+    if (mode === "local") {
+      update(bet.id, patch);
+      return;
+    }
+    try {
+      const res = await fetch(`/api/bets/${bet.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) setNotice(await errorMessage(res));
+    } catch {
+      setNotice("Could not save the change. Check your connection and try again.");
+    }
+    await refresh();
+  }
+
+  async function submitProposal(e: React.FormEvent) {
     e.preventDefault();
     const odds = Number(form.odds);
     const stake = Number(form.stake);
@@ -100,21 +156,48 @@ export default function BetQueue() {
       setFormError(err);
       return;
     }
-    const bet: Bet = {
-      id: newId(),
-      event: form.event.trim(),
-      market: form.market.trim(),
-      selection: form.selection.trim(),
-      odds,
-      stake,
-      notes: form.notes.trim(),
-      proposedBy: form.proposedBy.trim(),
-      createdAt: new Date().toISOString(),
-      status: "proposed",
-    };
-    setBets((prev) => [bet, ...prev]);
-    setForm(emptyForm);
-    setFormError(null);
+    if (mode === "local") {
+      const bet: Bet = {
+        id: newId(),
+        event: form.event.trim(),
+        market: form.market.trim(),
+        selection: form.selection.trim(),
+        odds,
+        stake,
+        notes: form.notes.trim(),
+        proposedBy: form.proposedBy.trim(),
+        createdAt: new Date().toISOString(),
+        status: "proposed",
+      };
+      setBets((prev) => [bet, ...prev]);
+      setForm(emptyForm);
+      setFormError(null);
+      return;
+    }
+    try {
+      const res = await fetch("/api/bets", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          event: form.event,
+          market: form.market,
+          selection: form.selection,
+          odds,
+          stake,
+          notes: form.notes,
+          proposedBy: form.proposedBy,
+        }),
+      });
+      if (!res.ok) {
+        setFormError(await errorMessage(res));
+        return;
+      }
+      setForm(emptyForm);
+      setFormError(null);
+      await refresh();
+    } catch {
+      setFormError("Could not save the bet. Check your connection and try again.");
+    }
   }
 
   function startPlacing(bet: Bet) {
@@ -129,11 +212,12 @@ export default function BetQueue() {
       setNotice("Enter the actual odds (greater than 1.00) and stake you placed.");
       return;
     }
-    update(bet.id, { status: "placed", placedOdds: odds, placedStake: stake, placedAt: new Date().toISOString() });
+    changeBet(bet, { status: "placed", placedOdds: odds, placedStake: stake, placedAt: new Date().toISOString() });
     setPlacingId(null);
     setNotice(null);
   }
 
+  // Local fallback only: the shared database has no delete endpoint.
   function remove(bet: Bet) {
     if (window.confirm(`Delete "${bet.selection}" on ${bet.event}?`)) {
       setBets((prev) => prev.filter((b) => b.id !== bet.id));
@@ -157,7 +241,7 @@ export default function BetQueue() {
       {/* Proposal form (members) */}
       <section className="rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
         <h2 className="mb-3 text-lg font-medium text-slate-900 dark:text-white">Propose a bet</h2>
-        <form onSubmit={submitProposal} className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <form onSubmit={(e) => submitProposal(e)} className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <label className="space-y-1 text-sm lg:col-span-2">
             <span className="text-slate-600 dark:text-slate-300">Event *</span>
             <input className={inputClass} value={form.event} onChange={(e) => setForm({ ...form, event: e.target.value })} placeholder="e.g. Arsenal v Spurs, Sat 15:00" />
@@ -216,13 +300,21 @@ export default function BetQueue() {
           ))}
         </div>
 
+        {mode === "local" && (
+          <p role="status" className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-900/30 dark:text-amber-200">
+            Shared database not connected — queue saved in this browser only
+          </p>
+        )}
+
+        {loadError && <p className="text-sm text-rose-600 dark:text-rose-400">{loadError}</p>}
+
         {notice && (
           <p role="status" className="text-sm text-slate-600 dark:text-slate-300">
             {notice}
           </p>
         )}
 
-        {loaded && visible.length === 0 && (
+        {mode !== "unknown" && visible.length === 0 && (
           <p className="rounded-lg border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500 dark:border-slate-700">
             No bets here yet.
           </p>
@@ -296,19 +388,19 @@ export default function BetQueue() {
 
               <div className="flex flex-wrap gap-2 text-sm">
                 {NEXT_ACTIONS[bet.status].includes("approve") && (
-                  <ActionButton onClick={() => update(bet.id, { status: "approved" })}>Approve</ActionButton>
+                  <ActionButton onClick={() => changeBet(bet, { status: "approved" })}>Approve</ActionButton>
                 )}
                 {NEXT_ACTIONS[bet.status].includes("place") && (
                   <ActionButton onClick={() => startPlacing(bet)}>Mark as placed</ActionButton>
                 )}
                 {NEXT_ACTIONS[bet.status].includes("settle_won") && (
-                  <ActionButton onClick={() => update(bet.id, { status: "settled_won", settledAt: new Date().toISOString() })}>Won</ActionButton>
+                  <ActionButton onClick={() => changeBet(bet, { status: "settled_won", settledAt: new Date().toISOString() })}>Won</ActionButton>
                 )}
                 {NEXT_ACTIONS[bet.status].includes("settle_lost") && (
-                  <ActionButton onClick={() => update(bet.id, { status: "settled_lost", settledAt: new Date().toISOString() })}>Lost</ActionButton>
+                  <ActionButton onClick={() => changeBet(bet, { status: "settled_lost", settledAt: new Date().toISOString() })}>Lost</ActionButton>
                 )}
                 {NEXT_ACTIONS[bet.status].includes("settle_void") && (
-                  <ActionButton onClick={() => update(bet.id, { status: "settled_void", settledAt: new Date().toISOString() })}>Void</ActionButton>
+                  <ActionButton onClick={() => changeBet(bet, { status: "settled_void", settledAt: new Date().toISOString() })}>Void</ActionButton>
                 )}
               </div>
 
@@ -324,9 +416,11 @@ export default function BetQueue() {
                 <button type="button" onClick={() => copyDetails(bet)} className="rounded-md border border-slate-300 px-3 py-1.5 hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800">
                   Copy bet details
                 </button>
-                <button type="button" onClick={() => remove(bet)} className="ml-auto text-rose-600 hover:underline dark:text-rose-400">
-                  Delete
-                </button>
+                {mode === "local" && (
+                  <button type="button" onClick={() => remove(bet)} className="ml-auto text-rose-600 hover:underline dark:text-rose-400">
+                    Delete
+                  </button>
+                )}
               </div>
             </li>
           ))}
