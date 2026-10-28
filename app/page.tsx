@@ -1,30 +1,34 @@
 import Link from "next/link";
 import BarChartView from "@/components/BarChart";
 import CumulativeChart from "@/components/CumulativeChart";
-import { fetchSettledQueueBets } from "@/lib/db";
-import { getIndex, getSheet } from "@/lib/data";
+import { fetchLedgerData } from "@/lib/records";
+import { getIndex } from "@/lib/data";
+import { loadTracker } from "@/lib/tracker";
 import {
-  type SettledQueueBet,
+  type Ledger,
   type Stats,
   type Tracker,
   OTHER_PROPOSER,
+  WEEKLY_BANKED,
+  WEEKLY_PAYMENT,
+  WEEKLY_STAKE,
+  buildLedger,
+  byProposer,
   computeStats,
   cumulativeSeries,
+  emptyLedger,
   formatDate,
   formatGBP,
   formatPct,
-  includedQueueBets,
   lastSpreadsheetDay,
   memberStats,
   monthlySeries,
-  parseTracker,
-  queueByProposer,
   recentSettled,
   reconcile,
   weeklySeries,
 } from "@/lib/stats";
 
-// Settled queue bets are read on every request, so the figures follow the queue without a redeploy.
+// Database rows are read on every request, so the figures follow the queue, results, fines and payments without a redeploy.
 export const dynamic = "force-dynamic";
 
 const RESULT_LABEL = { settled_won: "Won", settled_lost: "Lost", settled_void: "Void" } as const;
@@ -94,12 +98,11 @@ function TableTwin({ summary, head, rows }: { summary: string; head: string[]; r
 
 export default async function DashboardPage() {
   const index = getIndex();
-  const trackerMeta = index.sheets.find((s) => s.name === "TWOL (New)");
-  const tracker = parseTracker(trackerMeta ? getSheet(trackerMeta.slug) : null);
+  const tracker = loadTracker();
   const sheetStats = tracker ? computeStats(tracker) : null;
 
-  // Queue bets: null when no database is configured or the query fails. The page then shows spreadsheet figures only.
-  const settledQueue = await fetchSettledQueueBets();
+  // Database data: null when no database is configured or the query fails. The page then shows spreadsheet figures only.
+  const data = await fetchLedgerData();
 
   return (
     <div className="space-y-8">
@@ -124,18 +127,27 @@ export default async function DashboardPage() {
         <Dashboard
           tracker={tracker}
           sheetStats={sheetStats}
-          queue={settledQueue ? includedQueueBets(tracker, settledQueue) : []}
-          queueConnected={settledQueue !== null}
+          ledger={data ? buildLedger(tracker, new Date(), data) : emptyLedger()}
+          connected={data !== null}
         />
       )}
 
-      <section>
+      <section className="flex flex-wrap gap-3">
         <Link
           href="/bets"
           className="inline-block rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700 dark:bg-white dark:text-slate-900 dark:hover:bg-slate-200"
         >
           Open the Bet Queue
         </Link>
+        {(["/payments", "/results", "/fines"] as const).map((href) => (
+          <Link
+            key={href}
+            href={href}
+            className="inline-block rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-100 dark:hover:bg-slate-800"
+          >
+            {href === "/payments" ? "Payments" : href === "/results" ? "Results" : "Fines"}
+          </Link>
+        ))}
       </section>
     </div>
   );
@@ -145,39 +157,42 @@ export default async function DashboardPage() {
 function Dashboard({
   tracker,
   sheetStats,
-  queue,
-  queueConnected,
+  ledger,
+  connected,
 }: {
   tracker: Tracker;
   sheetStats: Stats;
-  queue: SettledQueueBet[];
-  queueConnected: boolean;
+  ledger: Ledger;
+  connected: boolean;
 }) {
-  // With no queue bets (or no database) this equals sheetStats.
-  const s = computeStats(tracker, queue) ?? sheetStats;
-  const weeks = weeklySeries(tracker, s);
-  const months = monthlySeries(weeks, queue);
-  const members = memberStats(tracker, s, queue);
-  const proposers = queueByProposer(tracker, queue);
+  // With an empty ledger (no database, or nothing recorded after the cut-off) this equals sheetStats.
+  const s = computeStats(tracker, ledger) ?? sheetStats;
+  const weeks = weeklySeries(tracker);
+  const months = monthlySeries(weeks, ledger.bets, ledger.allocations);
+  const members = memberStats(tracker, s, ledger);
+  const proposers = byProposer(tracker, ledger.bets);
   const other = proposers.find((p) => p.name === OTHER_PROPOSER);
   const checks = reconcile(tracker, sheetStats);
   const cutoffDay = lastSpreadsheetDay(tracker);
-  const recent = recentSettled(queue, 10);
+  const recent = recentSettled(ledger.bets, 10);
+  const series = cumulativeSeries(weeks, ledger.bets, ledger.allocations);
   const roi = (x: number) => `${x > 0 ? "+" : ""}${formatPct(x)} ROI`;
-  const decided = s.queueWon + s.queueLost;
+  const decided = s.settledWon + s.settledLost;
+  const afterCutoff = s.postWeeks > 0 || ledger.bets.length > 0 || ledger.finesPaid > 0 || ledger.finesOverdue > 0;
 
   return (
     <div className="space-y-8">
       <p className="text-sm text-slate-600 dark:text-slate-300">
         Figures cover {sheetStats.weeks} weeks (from {formatDate(weeks[0]?.start ?? null)}, latest week starts{" "}
         {formatDate(weeks.at(-1)?.start ?? null)}) and {sheetStats.members} members, from the TWOL (New) sheet.
-        {queueConnected && cutoffDay && (
+        {connected && cutoffDay && (
           <>
             {" "}
-            Includes queue bets settled after {formatDate(cutoffDay)}
-            {queue.length ? ` (${queue.length} so far).` : " (none so far)."}
+            Includes payments, bets, results and fines recorded after {formatDate(cutoffDay)}
+            {s.postWeeks > 0 ? `: ${s.postWeeks} week${s.postWeeks === 1 ? "" : "s"} since the sheet ends, counted up to this week.` : " (no weeks since the sheet ends yet)."}
           </>
         )}
+        {!connected && " The shared database is not connected, so only the sheet is shown."}
       </p>
 
       <Panel title="Progress to target">
@@ -198,22 +213,34 @@ function Dashboard({
       </Panel>
 
       <section className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Tile label="Pot (overall)" value={formatGBP(s.pot)} note="Banked + punts + fines + interest, less queue stakes" />
-        <Tile label="Paid in" value={formatGBP(s.paidIn)} note={`${s.weeks} weeks x ${formatGBP(s.paidIn / s.weeks)}`} />
+        <Tile label="Pot (overall)" value={formatGBP(s.pot)} note="Banked + punts + fines paid + interest" />
+        <Tile
+          label="Paid in"
+          value={formatGBP(s.paidIn)}
+          note={
+            s.paidMemberWeeks
+              ? `${s.weeks} sheet weeks, plus ${s.paidMemberWeeks} paid member-weeks at ${formatGBP(WEEKLY_PAYMENT)}`
+              : `${s.weeks} weeks x ${formatGBP(s.paidIn / s.weeks)}`
+          }
+        />
         <Tile
           label="Returns (punts)"
           value={formatGBP(s.punts)}
-          note={queue.length ? `Members' weekly punts plus ${formatGBP(s.queueReturns)} from queue bets` : "Members' weekly punts, summed"}
+          note={afterCutoff ? `Members' weekly punts plus ${formatGBP(s.settledReturns)} from bets and results` : "Members' weekly punts, summed"}
         />
         <Tile
           label="Staked"
           value={formatGBP(s.staked)}
-          note={queue.length ? "Paid in minus banked, plus queue stakes" : "Paid in minus banked"}
+          note={
+            s.paidMemberWeeks
+              ? `Paid in minus banked, plus ${formatGBP(WEEKLY_STAKE)} per paid member-week since the sheet ends`
+              : "Paid in minus banked"
+          }
         />
         <Tile
           label="Bet P&L"
           value={signed(s.betPnl)}
-          note={`Returns minus stakes, ${roi(s.betRoi)}`}
+          note={`Returns minus staked, ${roi(s.betRoi)}`}
           tone={s.betPnl >= 0 ? "pos" : "neg"}
         />
         <Tile
@@ -231,9 +258,16 @@ function Dashboard({
         />
         {decided > 0 && (
           <Tile
-            label="Strike rate (queue bets)"
-            value={formatPct(s.queueStrikeRate ?? 0)}
-            note={`${s.queueWon} won, ${s.queueLost} lost, ${s.queueVoid} void. Void bets are not counted.`}
+            label="Strike rate (settled bets)"
+            value={formatPct(s.strikeRate ?? 0)}
+            note={`${s.settledWon} won, ${s.settledLost} lost, ${s.settledVoid} void. Void bets are not counted.`}
+          />
+        )}
+        {s.settledBets > 0 && (
+          <Tile
+            label="Stakes placed"
+            value={formatGBP(s.placedStakes)}
+            note={`On ${s.settledBets} settled bets since the sheet ends. Paid for from the weekly stake, not counted again.`}
           />
         )}
         <Tile label="Best single punt" value={formatGBP(sheetStats.bestPunt)} note="Highest member-week punt" />
@@ -243,22 +277,25 @@ function Dashboard({
 
       <Panel title="Cumulative bet P&L over time" id="pnl">
         <p className="text-sm text-slate-600 dark:text-slate-300">
-          Each week&apos;s returns minus its stakes, added up, then each queue bet in the order it settled. Fines and interest are
-          only recorded as totals, so they are not in this line (they are in overall P&amp;L above).
+          Each sheet week&apos;s returns minus its stakes, added up. After the sheet ends, each week&apos;s stake allocation
+          steps the line down and each settled bet or result steps it up by its returns, in date order. Fines and interest
+          are not in this line (they are in overall P&amp;L above).
         </p>
         <CumulativeChart
-          data={cumulativeSeries(weeks, queue).map((p) => ({
+          data={series.map((p) => ({
             x: p.x,
             y: Math.round(p.cum * 100) / 100,
             detail: p.week
               ? `${formatDate(p.week.start)} · punts ${formatGBP(p.week.punts)} · staked ${formatGBP(p.week.staked)}`
-              : p.bet
-                ? `${formatDate(p.bet.settledAt)} · ${p.bet.selection} @ ${p.bet.placedOdds.toFixed(2)} · ${RESULT_LABEL[p.bet.status]} · returns ${formatGBP(p.bet.returns)}`
-                : "",
+              : p.allocation
+                ? `${formatDate(p.allocation.start)} · ${p.allocation.paidMembers} paid x ${formatGBP(WEEKLY_STAKE)} staked`
+                : p.bet
+                  ? `${formatDate(p.bet.settledAt)} · ${p.bet.source === "result" ? "Result" : `${p.bet.selection} @ ${p.bet.placedOdds?.toFixed(2) ?? "-"}`} · ${RESULT_LABEL[p.bet.status]} · returns ${formatGBP(p.bet.returns)}`
+                  : "",
           }))}
         />
         <TableTwin
-          summary="View as table"
+          summary="View sheet weeks as table"
           head={["Week", "Starts", "Punts", "Staked", "Bet P&L", "Cumulative"]}
           rows={weeks.map((w) => [
             w.week,
@@ -271,18 +308,18 @@ function Dashboard({
         />
       </Panel>
 
-      {queueConnected && (
-        <Panel title="Recent settled bets" id="recent">
+      {connected && (
+        <Panel title="Recent settled bets and results" id="recent">
           {recent.length === 0 ? (
             <p className="text-sm text-slate-600 dark:text-slate-300">
-              No queue bets settled since {cutoffDay ? formatDate(cutoffDay) : "the spreadsheet's last week"} yet.
+              Nothing settled since {cutoffDay ? formatDate(cutoffDay) : "the spreadsheet's last week"} yet.
             </p>
           ) : (
             <div className="overflow-x-auto rounded-md border border-slate-200 dark:border-slate-700">
               <table className="min-w-full divide-y divide-slate-200 text-sm dark:divide-slate-700">
                 <thead className="bg-slate-50 dark:bg-slate-800">
                   <tr>
-                    {["Event", "Selection", "Odds", "Stake", "Result", "Returns"].map((h) => (
+                    {["Source", "Event", "Selection", "Odds", "Stake", "Result", "Returns"].map((h) => (
                       <th key={h} className="whitespace-nowrap px-3 py-2 text-left font-medium text-slate-600 dark:text-slate-300">
                         {h}
                       </th>
@@ -291,10 +328,11 @@ function Dashboard({
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
                   {recent.map((b) => (
-                    <tr key={b.id}>
+                    <tr key={`${b.source}-${b.id}`}>
+                      <td className="whitespace-nowrap px-3 py-2 text-slate-500 dark:text-slate-400">{b.source === "queue" ? "Queue" : "Result"}</td>
                       <td className="px-3 py-2 text-slate-700 dark:text-slate-200">{b.event}</td>
-                      <td className="px-3 py-2 text-slate-700 dark:text-slate-200">{b.selection}</td>
-                      <td className="whitespace-nowrap px-3 py-2 tabular-nums">{b.placedOdds.toFixed(2)}</td>
+                      <td className="px-3 py-2 text-slate-700 dark:text-slate-200">{b.selection || "-"}</td>
+                      <td className="whitespace-nowrap px-3 py-2 tabular-nums">{b.placedOdds?.toFixed(2) ?? "-"}</td>
                       <td className="whitespace-nowrap px-3 py-2 tabular-nums">{formatGBP(b.placedStake)}</td>
                       <td className="whitespace-nowrap px-3 py-2">{RESULT_LABEL[b.status]}</td>
                       <td className="whitespace-nowrap px-3 py-2 tabular-nums">{formatGBP(b.returns)}</td>
@@ -326,7 +364,7 @@ function Dashboard({
 
       <Panel title="By member: total punts">
         <p className="text-sm text-slate-600 dark:text-slate-300">
-          Total returns each member has brought in, including queue bets they proposed. Full figures per member are on the{" "}
+          Total returns each member has brought in, including bets and results credited to them. Full figures per member are on the{" "}
           <Link href="/members" className="underline underline-offset-2">
             Members page
           </Link>
@@ -346,7 +384,7 @@ function Dashboard({
                   {
                     label: OTHER_PROPOSER,
                     value: Math.round(other.returns * 100) / 100,
-                    detail: `${formatPct(s.punts ? other.returns / s.punts : 0)} of all punts (queue bets from names not on the sheet)`,
+                    detail: `${formatPct(s.punts ? other.returns / s.punts : 0)} of all punts (bets and results credited to names not on the sheet, or to the syndicate)`,
                   },
                 ]
               : []),
@@ -362,7 +400,7 @@ function Dashboard({
       </Panel>
 
       <Panel title="Checks against the spreadsheet's own totals">
-        <p className="text-sm text-slate-600 dark:text-slate-300">These compare the spreadsheet import only. Queue bets are not part of the sheet.</p>
+        <p className="text-sm text-slate-600 dark:text-slate-300">These compare the spreadsheet import only. Nothing recorded in the database is part of the sheet.</p>
         <ul className="divide-y divide-slate-100 text-sm dark:divide-slate-800">
           {checks.map((c) => (
             <li key={c.label} className="flex flex-wrap items-center justify-between gap-2 py-2">
@@ -381,26 +419,31 @@ function Dashboard({
       <Panel title="How the figures are worked out">
         <ul className="list-disc space-y-1 pl-5 text-sm text-slate-600 dark:text-slate-300">
           <li>
-            Each member pays {formatGBP(5)} a week: {formatGBP(2.5)} is banked and {formatGBP(2.5)} is staked on bets. Staked
-            is paid in minus banked, plus the stakes of queue bets.
+            Each member pays {formatGBP(WEEKLY_PAYMENT)} a week by standing order: {formatGBP(WEEKLY_BANKED)} is banked and{" "}
+            {formatGBP(WEEKLY_STAKE)} is staked. After the sheet ends, every member counts as paid for each week up to this one, unless a
+            missed payment is recorded on the Payments page.
           </li>
           <li>
-            Punts are the members&apos; weekly returns from the sheet, plus the returns of settled queue bets. Returns include the
-            stake: won = stake x odds, lost = £0, void = stake refunded. Bet P&amp;L = returns minus stakes.
+            Staked = paid in minus banked (the sheet&apos;s rule), plus {formatGBP(WEEKLY_STAKE)} for each paid member-week after the
+            sheet. Stakes on individual bets are paid for from that weekly stake, so they are not added again.
           </li>
           <li>
-            Pot = banked + punts + fines + interest, the same formula as the sheet&apos;s &quot;Overall&quot;. Each queue bet
-            takes its stake out and adds its returns, so pot = banked + punts + fines + interest minus queue stakes.
+            Punts = the members&apos; weekly returns from the sheet, plus the returns of bets and results settled after the sheet
+            (returns include the stake: won = stake x odds, lost = £0, void = stake refunded). Bet P&amp;L = punts minus staked.
           </li>
           <li>
-            Queue bets count only if settled after the last week in the spreadsheet (the cut-off), so a bet is never counted
-            twice. The cut-off moves forward when a newer spreadsheet is imported.
+            Pot = banked + punts + fines paid + interest, the sheet&apos;s own &quot;Overall&quot; formula. Overall P&amp;L = pot minus
+            paid in, which equals bet P&amp;L + fines paid + interest.
           </li>
           <li>
-            Weekly payments after the cut-off are not in the pot until the spreadsheet is re-imported, so the pot is lower than
-            the real money held until then.
+            Fines paid after the sheet count towards fines paid and the pot once marked paid. Unpaid fines given after the sheet are
+            overdue (shown, not in the pot).
           </li>
-          <li>Week dates count from the sheet&apos;s starting date, 7 days per week. Weeks with no banking are not counted.</li>
+          <li>
+            Bets, results, payments and fines count only from the cut-off: the day after the last week in the spreadsheet. The
+            cut-off moves forward when a newer spreadsheet is imported, and anything recorded before it stops being counted separately.
+          </li>
+          <li>Week dates count from the sheet&apos;s starting date, 7 days per week. Weeks in the future are never counted.</li>
           <li>The old tracker (TWOL (Old)) covers the first 10 weeks and is not used in these totals.</li>
         </ul>
       </Panel>

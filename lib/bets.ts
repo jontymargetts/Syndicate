@@ -54,6 +54,9 @@ export type Bet = {
 
 export const STORAGE_KEY = "syndicate.betQueue.v1";
 
+/** Stake (GBP) pre-filled in the propose and placed forms. The leader can change it. */
+export const DEFAULT_STAKE = 2.5;
+
 export function newId(): string {
   return `bet_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }

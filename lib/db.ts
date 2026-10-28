@@ -1,7 +1,9 @@
-// Server-only database access for the bet queue. Imported only by app/api/bets/* route handlers.
+// Server-only database access: connection, schema bootstrap and the bet queue. Imported only by server code
+// (app/api/* route handlers and lib/records.ts).
 // Uses the Neon serverless HTTP driver with parameterised queries only.
 //
 // NOTE: SCHEMA_STATEMENTS mirrors db/schema.sql. Keep the two in step.
+// Queries for payments, results and fines live in lib/records.ts.
 
 import { neon, type NeonQueryFunction } from "@neondatabase/serverless";
 import { NextResponse } from "next/server";
@@ -14,7 +16,6 @@ import {
   parseOdds,
   resolveReturns,
 } from "@/lib/bets";
-import type { SettledQueueBet } from "@/lib/stats";
 
 export type Sql = NeonQueryFunction<false, false>;
 type Row = Record<string, unknown>;
@@ -41,6 +42,36 @@ const SCHEMA_STATEMENTS = [
 )`,
   `create index if not exists bets_status_idx on bets(status)`,
   `create index if not exists bets_created_at_idx on bets(created_at desc)`,
+  `create table if not exists payments (
+  id uuid primary key default gen_random_uuid(),
+  member text not null,
+  week_number integer not null check (week_number >= 1),
+  paid boolean not null,
+  note text,
+  updated_at timestamptz not null default now(),
+  unique (member, week_number)
+)`,
+  `create table if not exists results (
+  id uuid primary key default gen_random_uuid(),
+  created_at timestamptz not null default now(),
+  result_date date not null,
+  member text not null,
+  description text,
+  stake numeric(12,2) not null check (stake >= 0),
+  returns numeric(12,2) not null check (returns >= 0),
+  notes text
+)`,
+  `create index if not exists results_date_idx on results(result_date)`,
+  `create table if not exists fines (
+  id uuid primary key default gen_random_uuid(),
+  created_at timestamptz not null default now(),
+  member text not null,
+  amount numeric(12,2) not null check (amount >= 0),
+  reason text,
+  fine_date date not null,
+  paid_at timestamptz
+)`,
+  `create index if not exists fines_fine_date_idx on fines(fine_date)`,
 ];
 
 // The UI uses settled_* statuses; the database stores won/lost/void.
@@ -111,13 +142,13 @@ export function dbErrorResponse(err: unknown): NextResponse {
 
 // ---------- row mapping ----------
 
-function toNum(v: unknown): number | undefined {
+export function toNum(v: unknown): number | undefined {
   if (v === null || v === undefined || v === "") return undefined;
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
 }
 
-function toIso(v: unknown): string | undefined {
+export function toIso(v: unknown): string | undefined {
   if (v === null || v === undefined) return undefined;
   if (v instanceof Date) return v.toISOString();
   // Postgres text form, e.g. "2026-10-28 10:00:00+00"
@@ -153,47 +184,6 @@ export function rowToBet(row: Row): Bet {
     bet.returns = autoReturns(bet.status, placedStake, placedOdds);
   }
   return bet;
-}
-
-// Only fully settled bets with their figures can feed the dashboard.
-function toSettledQueueBet(bet: Bet): SettledQueueBet | null {
-  if (!isSettledStatus(bet.status)) return null;
-  if (bet.placedOdds === undefined || bet.placedStake === undefined || bet.returns === undefined || !bet.settledAt) {
-    return null;
-  }
-  return {
-    id: bet.id,
-    event: bet.event,
-    selection: bet.selection,
-    proposedBy: bet.proposedBy,
-    status: bet.status,
-    placedOdds: bet.placedOdds,
-    placedStake: bet.placedStake,
-    returns: bet.returns,
-    settledAt: new Date(bet.settledAt),
-  };
-}
-
-/**
- * Settled queue bets for the dashboard and members pages, read at request time.
- * Returns null when no database is configured or the query fails; callers then show spreadsheet-only figures.
- */
-export async function fetchSettledQueueBets(): Promise<SettledQueueBet[] | null> {
-  if (!getDatabaseUrl()) return null;
-  try {
-    const sql = await readyDb();
-    const rows = (await sql.query(
-      `select * from bets
-       where status in ('won','lost','void') and settled_at is not null
-         and placed_odds is not null and placed_stake is not null
-       order by settled_at asc`,
-      [],
-    )) as Row[];
-    return rows.map(rowToBet).map(toSettledQueueBet).filter((b): b is SettledQueueBet => b !== null);
-  } catch (err) {
-    console.error("Bet queue unavailable; showing spreadsheet figures only:", err);
-    return null;
-  }
 }
 
 // ---------- input validation ----------

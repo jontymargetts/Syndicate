@@ -4,6 +4,9 @@ const links = [
   { href: "/", label: "Dashboard" },
   { href: "/members", label: "Members" },
   { href: "/bets", label: "Bet Queue" },
+  { href: "/payments", label: "Payments" },
+  { href: "/results", label: "Results" },
+  { href: "/fines", label: "Fines" },
 ];
 
 export default function NavBar({ datasets }: { datasets: { slug: string; name: string }[] }) {

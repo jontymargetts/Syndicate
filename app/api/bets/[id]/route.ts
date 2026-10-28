@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { dbErrorResponse, parseBetPatch, readyDb, updateBet } from "@/lib/db";
+import { deleteBet } from "@/lib/records";
 
 export const dynamic = "force-dynamic";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // PATCH /api/bets/:id: advance status and record placed/settled details. When settling, returns are
-// computed here unless supplied (see updateBet in lib/db.ts). There is no DELETE.
+// computed here unless supplied (see updateBet in lib/db.ts).
 export async function PATCH(request: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
   if (!UUID.test(id)) {
@@ -39,6 +40,23 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       case "conflict":
         return NextResponse.json({ error: "conflict", message: "The bet changed while you were editing. Refresh and try again." }, { status: 409 });
     }
+  } catch (err) {
+    return dbErrorResponse(err);
+  }
+}
+
+// DELETE /api/bets/:id: removes the bet. A deleted bet drops out of every figure.
+export async function DELETE(_request: Request, context: { params: Promise<{ id: string }> }) {
+  const { id } = await context.params;
+  if (!UUID.test(id)) {
+    return NextResponse.json({ error: "not_found", message: "Bet not found." }, { status: 404 });
+  }
+  try {
+    const sql = await readyDb();
+    if (!(await deleteBet(sql, id))) {
+      return NextResponse.json({ error: "not_found", message: "Bet not found." }, { status: 404 });
+    }
+    return NextResponse.json({ ok: true });
   } catch (err) {
     return dbErrorResponse(err);
   }

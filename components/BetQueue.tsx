@@ -11,6 +11,7 @@ import {
   NEXT_ACTIONS,
   STATUSES,
   STATUS_LABEL,
+  DEFAULT_STAKE,
   STORAGE_KEY,
   type SettledStatus,
   autoReturns,
@@ -59,7 +60,7 @@ async function errorMessage(res: Response): Promise<string> {
   return `Request failed (${res.status}).`;
 }
 
-const emptyForm = { event: "", market: "", selection: "", odds: "", stake: "", notes: "", proposedBy: "" };
+const emptyForm = { event: "", market: "", selection: "", odds: "", stake: DEFAULT_STAKE.toFixed(2), notes: "", proposedBy: "" };
 
 const STATUS_STYLE: Record<BetStatus, string> = {
   proposed: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200",
@@ -237,7 +238,7 @@ export default function BetQueue() {
 
   function startPlacing(bet: Bet) {
     setPlacingId(bet.id);
-    setPlaceForm({ odds: String(bet.odds), stake: String(bet.stake) });
+    setPlaceForm({ odds: String(bet.odds), stake: DEFAULT_STAKE.toFixed(2) });
   }
 
   function confirmPlaced(bet: Bet) {
@@ -272,11 +273,25 @@ export default function BetQueue() {
     }
   }
 
-  // Local fallback only: the shared database has no delete endpoint.
-  function remove(bet: Bet) {
-    if (window.confirm(`Delete "${bet.selection}" on ${bet.event}?`)) {
+  // Deletes a bet (DELETE /api/bets/:id, or this browser's copy in local mode). A deleted bet drops out of every figure.
+  async function removeBet(bet: Bet) {
+    if (!window.confirm(`Delete "${bet.selection}" on ${bet.event}? This cannot be undone.`)) return;
+    if (mode === "local") {
       setBets((prev) => prev.filter((b) => b.id !== bet.id));
+      return;
     }
+    try {
+      const res = await fetch(`/api/bets/${bet.id}`, { method: "DELETE" });
+      if (!res.ok) {
+        setNotice(await errorMessage(res));
+        return;
+      }
+      setNotice(null);
+    } catch {
+      setNotice("Could not delete the bet. Check your connection and try again.");
+      return;
+    }
+    await refresh();
   }
 
   async function copyDetails(bet: Bet) {
@@ -508,11 +523,9 @@ export default function BetQueue() {
                 <button type="button" onClick={() => copyDetails(bet)} className="rounded-md border border-slate-300 px-3 py-1.5 hover:bg-slate-100 dark:border-slate-600 dark:hover:bg-slate-800">
                   Copy bet details
                 </button>
-                {mode === "local" && (
-                  <button type="button" onClick={() => remove(bet)} className="ml-auto text-rose-600 hover:underline dark:text-rose-400">
-                    Delete
-                  </button>
-                )}
+                <button type="button" onClick={() => removeBet(bet)} className="ml-auto text-rose-600 hover:underline dark:text-rose-400">
+                  Delete
+                </button>
               </div>
             </li>
             );

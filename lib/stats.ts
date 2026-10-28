@@ -4,22 +4,27 @@ import type { SettledStatus } from "./bets";
 // Pure statistics for the syndicate. No file access here, so this module is safe to import
 // from server components, client components and plain Node scripts (scripts/check-stats.mts).
 //
-// Two sources feed the figures:
+// Two kinds of input feed the figures:
 //   1. The spreadsheet (TWOL (New) sheet), imported into data/*.json. Weekly punts, banked, fines,
-//      interest and paid in, for weeks 1..N (N = weeks with banking recorded).
-//   2. Settled bets in the shared bet queue (Postgres). Only bets settled AFTER the spreadsheet's
-//      last week are included (see queueCutoff), so nothing is counted twice.
+//      interest and paid in, for weeks 1..N (N = weeks with banking recorded). These are the "sheet" figures.
+//   2. The "ledger": everything recorded in the database AFTER the spreadsheet's last week (the cut-off):
+//        - weekly payments (automatic: every member pays every week; only missed payments are stored),
+//        - settled bets from the queue and results entered by hand,
+//        - fines paid, and fines still unpaid.
+//      Nothing before the cut-off is counted from the database, so nothing is counted twice.
 //
-// What the spreadsheet records: weekly totals per member, not individual bets.
-// The queue records per-bet stakes, odds and returns, so per-bet strike rate is available for queue bets only.
-//
-// Assumptions (confirmed by the leader, stated on the dashboard):
-//   - Each member pays 5.00 a week: 2.50 is banked and 2.50 is staked on bets, every week.
+// Assumptions (stated on the dashboard):
+//   - Each member pays WEEKLY_PAYMENT (5) a week: WEEKLY_BANKED (2.50) is banked and WEEKLY_STAKE (2.50) is staked.
 //   - Week n starts on the "Starting Date" plus 7 * (n - 1) days (UTC).
-//   - Equal shares: every member pays the same amount, so each member's pot share is pot / members.
+//   - Equal shares of the pot: every member has the same share of the pot. Paid in is shared equally before the
+//     cut-off and then follows each member's own payments after it.
 
 const DAY_MS = 86_400_000;
 const WEEK_MS = 7 * DAY_MS;
+
+export const WEEKLY_PAYMENT = 5;
+export const WEEKLY_BANKED = 2.5;
+export const WEEKLY_STAKE = 2.5;
 
 export type Tracker = {
   members: MemberData[];
@@ -46,40 +51,118 @@ export type MemberData = {
   leaderboardTotal: number | null;
 };
 
-/** A settled bet from the shared queue, with the figures needed for the tracker. Money in GBP. */
-export type SettledQueueBet = {
+/** A settled bet that feeds the figures: a settled queue bet, or a result entered by hand. Money in GBP. */
+export type SettledBet = {
   id: string;
+  source: "queue" | "result";
   event: string;
   selection: string;
-  /** Who proposed the bet (free text). Matched to a member's first name for the Members page. */
+  /** Who proposed the bet (queue) or which member it is credited to (result). Matched to a member's name. */
   proposedBy: string;
   status: SettledStatus;
-  placedOdds: number;
+  /** Queue bets only. */
+  placedOdds?: number;
+  /** The stake. For queue bets this is the placed stake. It is not used for "staked" (see computeStats). */
   placedStake: number;
   /** Total paid back, stake included. Won = stake x odds, lost = 0, void = stake. */
   returns: number;
+  /** Queue: when it settled. Result: the result date at 00:00 UTC. */
   settledAt: Date;
+};
+
+/** A fine as stored in the database. */
+export type FineRecord = {
+  id: string;
+  member: string;
+  amount: number;
+  reason: string;
+  /** The date the fine was given (00:00 UTC). */
+  fineDate: Date;
+  paidAt: Date | null;
+};
+
+/** A stored payment exception. A member-week with no exception is paid. */
+export type PaymentException = {
+  member: string;
+  weekNumber: number;
+  paid: boolean;
+  note: string;
+};
+
+/** The stake money collected for one post-cut-off week: WEEKLY_STAKE for each paid member. */
+export type StakeAllocation = {
+  week: number;
+  start: Date | null;
+  paidMembers: number;
+  amount: number;
+};
+
+export type MemberPayments = {
+  member: string;
+  paidWeeks: number;
+  missedWeeks: number;
+  /** Paid in after the cut-off for this member (paidWeeks x WEEKLY_PAYMENT). */
+  paidAmount: number;
+};
+
+export type FinesByMember = Record<string, { paid: number; overdue: number }>;
+
+/** Everything recorded after the cut-off, already worked out for the figures. */
+export type Ledger = {
+  /** The cut-off instant, or null when the spreadsheet has no start date. */
+  cutoff: Date | null;
+  /** Weeks after the cut-off that count so far: from the first week after the sheet up to the current week. */
+  postWeeks: number[];
+  /** Settled bets (queue and results) settled on or after the cut-off, oldest first. */
+  bets: SettledBet[];
+  /** One per post-cut-off week. */
+  allocations: StakeAllocation[];
+  /** Paid member-weeks after the cut-off (the sum of the paid members in each week). */
+  paidMemberWeeks: number;
+  payments: MemberPayments[];
+  /** Fines paid after the cut-off (paid_at on or after the cut-off). */
+  finesPaid: number;
+  /** Fines given on or after the cut-off and still unpaid. */
+  finesOverdue: number;
+  finesByMember: FinesByMember;
+};
+
+export type LedgerInput = {
+  bets: SettledBet[];
+  payments: PaymentException[];
+  fines: FineRecord[];
 };
 
 export type Stats = {
   members: number;
+  /** Weeks in the spreadsheet (weeks up to the cut-off). */
   weeks: number;
+  /** Weeks after the cut-off counted so far. */
+  postWeeks: number;
+  /** Paid member-weeks after the cut-off. */
+  paidMemberWeeks: number;
+  /** Paid in: the sheet's paid in plus WEEKLY_PAYMENT per paid member-week after the cut-off. */
   paidIn: number;
+  /** Banked: the sheet's banked plus WEEKLY_BANKED per paid member-week after the cut-off. */
   banked: number;
-  /** Punts from the spreadsheet plus queue returns. */
+  /** Punts: the sheet's weekly punts plus the returns of settled bets after the cut-off. */
   punts: number;
-  /** Stakes: paid in minus banked (spreadsheet) plus queue stakes. */
+  /** Staked: the sheet's paid in minus banked, plus the weekly stake allocation after the cut-off (not bet stakes). */
   staked: number;
+  /** Stakes placed on settled bets after the cut-off (information only: not used for staked or the pot). */
+  placedStakes: number;
+  /** Fines paid: the sheet's fines plus fines paid after the cut-off. */
   fines: number;
+  /** Overdue: the sheet's overdue plus unpaid fines given after the cut-off. */
   overdue: number;
   interest: number;
   pot: number;
   target: number;
   progress: number;
-  /** Bet P&L: punts minus stakes (spreadsheet and queue). */
+  /** Bet P&L: punts minus staked. */
   betPnl: number;
   betRoi: number;
-  /** Overall P&L: pot minus paid in (includes fines and interest). */
+  /** Overall P&L: pot minus paid in. Equals bet P&L + fines paid + interest. */
   overallPnl: number;
   overallRoi: number;
   avgPotPerWeek: number;
@@ -91,15 +174,14 @@ export type Stats = {
   memberWeeks: number;
   bestPunt: number;
   bestWeek: number;
-  // Queue bets (already filtered to after the cut-off). Zero when there are none.
-  queueBets: number;
-  queueWon: number;
-  queueLost: number;
-  queueVoid: number;
-  queueStaked: number;
-  queueReturns: number;
-  /** won / (won + lost) for queue bets. Void bets are not counted. Null until a bet has won or lost. */
-  queueStrikeRate: number | null;
+  // Settled bets after the cut-off (queue and results). Zero when there are none.
+  settledBets: number;
+  settledWon: number;
+  settledLost: number;
+  settledVoid: number;
+  settledReturns: number;
+  /** won / (won + lost). Void bets are not counted. Null until a bet has won or lost. */
+  strikeRate: number | null;
 };
 
 export type WeekPoint = {
@@ -125,9 +207,9 @@ export type MonthPoint = {
 
 export type MemberStat = {
   name: string;
-  /** Spreadsheet punts plus queue returns attributed to this member. */
+  /** Spreadsheet punts plus settled-bet returns attributed to this member. */
   punts: number;
-  /** Queue returns attributed to this member (included in punts). */
+  /** Returns attributed to this member after the cut-off (included in punts). */
   queueReturns: number;
   puntsShare: number;
   weeksWithReturn: number;
@@ -135,16 +217,17 @@ export type MemberStat = {
   fines: number;
   overdue: number;
   banked: number;
+  /** Equal share of the sheet's paid in, plus this member's own payments after the cut-off. */
   paidIn: number;
   potShare: number;
-  /** Equal-share P&L: pot share minus paid-in share. */
+  /** Pot share minus paid in. */
   pnl: number;
 };
 
 export const OTHER_PROPOSER = "Other";
 
-/** Queue bets grouped by who proposed them. Names are matched to members case-insensitively. */
-export type QueueAttribution = {
+/** Settled bets grouped by who proposed them. Names are matched to members case-insensitively. */
+export type ProposerTotals = {
   name: string;
   bets: number;
   won: number;
@@ -159,12 +242,14 @@ export type CumulativePoint = {
   /** Cumulative bet P&L after this point. */
   cum: number;
   week?: WeekPoint;
-  bet?: SettledQueueBet;
+  bet?: SettledBet;
+  allocation?: StakeAllocation;
 };
 
 export type Check = { label: string; app: number; sheet: number; ok: boolean };
 
 const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+const round2 = (n: number) => Math.round(n * 100) / 100;
 
 function tableNamed(sheet: Sheet, title: string): Table | null {
   return sheet.tables.find((t) => t.title === title) ?? null;
@@ -256,7 +341,8 @@ export function parseTracker(sheet: Sheet | null): Tracker | null {
   };
 }
 
-function weekStart(t: Tracker, week: number): Date | null {
+/** Start of week n (UTC): the starting date plus 7 x (n - 1) days. */
+export function weekStart(t: Tracker, week: number): Date | null {
   if (!t.startDate) return null;
   return new Date(t.startDate.getTime() + (week - 1) * WEEK_MS);
 }
@@ -266,47 +352,144 @@ function monthKey(d: Date | null): string | null {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
-// ---------- queue bets: cut-off and filtering ----------
+// ---------- cut-off and weeks ----------
 
 /**
  * The cut-off: Starting Date + 7 x weeks played, i.e. the first instant after the spreadsheet's last week.
- * A queue bet feeds the figures only if it was settled at or after this instant. Bets settled before it
- * are already in the spreadsheet (or were never meant to count), so they must not be counted again.
+ * Anything recorded in the database (bets, results, fines paid, payments) counts only from this instant on.
  * Re-importing a later spreadsheet moves this forward automatically.
  */
-export function queueCutoff(t: Tracker): Date | null {
+export function cutoffDate(t: Tracker): Date | null {
   if (!t.startDate) return null;
   return new Date(t.startDate.getTime() + t.weekNumbers.length * WEEK_MS);
 }
 
 /** The last day covered by the spreadsheet (the day before the cut-off). Used in the dashboard wording. */
 export function lastSpreadsheetDay(t: Tracker): Date | null {
-  const cutoff = queueCutoff(t);
+  const cutoff = cutoffDate(t);
   return cutoff ? new Date(cutoff.getTime() - DAY_MS) : null;
 }
 
-/** Settled queue bets that feed the figures: settled at or after the cut-off, oldest first. */
-export function includedQueueBets(t: Tracker, bets: SettledQueueBet[]): SettledQueueBet[] {
-  const cutoff = queueCutoff(t);
-  if (!cutoff) return [];
-  return bets
-    .filter((b) => b.settledAt.getTime() >= cutoff.getTime())
-    .sort((a, b) => a.settledAt.getTime() - b.settledAt.getTime());
-}
-
-/** The most recently settled bets, newest first. */
-export function recentSettled(bets: SettledQueueBet[], n = 10): SettledQueueBet[] {
-  return [...bets].sort((a, b) => b.settledAt.getTime() - a.settledAt.getTime()).slice(0, n);
+/** The week number that contains `now` (1-based), or 0 before the starting date. */
+export function currentWeekNumber(t: Tracker, now: Date): number {
+  if (!t.startDate) return 0;
+  const diff = now.getTime() - t.startDate.getTime();
+  if (diff < 0) return 0;
+  return Math.floor(diff / WEEK_MS) + 1;
 }
 
 /**
- * Queue bets grouped by proposer. Each proposer is matched to a member name from the sheet, case-insensitively.
- * Members with no bets appear with zeros. Bets from anyone else go under "Other" (only listed if there are some).
+ * Weeks after the cut-off that count so far: the first week after the spreadsheet up to and including the
+ * current week. Future weeks are never counted. Empty before the cut-off.
  */
-export function queueByProposer(t: Tracker, bets: SettledQueueBet[]): QueueAttribution[] {
+export function postCutoffWeeks(t: Tracker, now: Date): number[] {
+  const first = t.weekNumbers.length + 1;
+  const last = currentWeekNumber(t, now);
+  if (!t.startDate || last < first) return [];
+  return Array.from({ length: last - first + 1 }, (_, i) => first + i);
+}
+
+/** True unless a payment exception for this member and week says it was missed. */
+export function isPaid(exceptions: readonly PaymentException[], member: string, week: number): boolean {
+  const e = exceptions.find((x) => x.member === member && x.weekNumber === week);
+  return !e || e.paid;
+}
+
+/** Outcome of a result entered by hand: won if returns > stake, void if equal, otherwise lost. */
+export function resultOutcome(stake: number, returns: number): SettledStatus {
+  const diff = round2(returns - stake);
+  if (diff > 0) return "settled_won";
+  if (diff === 0) return "settled_void";
+  return "settled_lost";
+}
+
+// ---------- ledger ----------
+
+export function emptyLedger(): Ledger {
+  return {
+    cutoff: null,
+    postWeeks: [],
+    bets: [],
+    allocations: [],
+    paidMemberWeeks: 0,
+    payments: [],
+    finesPaid: 0,
+    finesOverdue: 0,
+    finesByMember: {},
+  };
+}
+
+/**
+ * Works out everything recorded after the cut-off, as at `now`.
+ *  - Bets: settled on or after the cut-off (queue bets and results).
+ *  - Payments: each member pays every post-cut-off week (up to now) unless a missed-payment exception says otherwise.
+ *    Exceptions for weeks outside that range (before the cut-off or in the future) are ignored.
+ *  - Fines: paid on or after the cut-off count as paid; unpaid fines given on or after the cut-off count as overdue.
+ */
+export function buildLedger(t: Tracker, now: Date, input: LedgerInput): Ledger {
+  const cutoff = cutoffDate(t);
+  if (!cutoff) return emptyLedger();
+  const postWeeks = postCutoffWeeks(t, now);
+  const members = t.members.map((m) => m.name);
+  const known = new Set(members);
+  const counted = new Set(postWeeks);
+
+  const bets = input.bets
+    .filter((b) => b.settledAt.getTime() >= cutoff.getTime())
+    .sort((a, b) => a.settledAt.getTime() - b.settledAt.getTime());
+
+  const missed = new Set(
+    input.payments
+      .filter((p) => !p.paid && known.has(p.member) && counted.has(p.weekNumber))
+      .map((p) => `${p.member}|${p.weekNumber}`),
+  );
+
+  const payments: MemberPayments[] = members.map((member) => {
+    const missedWeeks = postWeeks.filter((w) => missed.has(`${member}|${w}`)).length;
+    const paidWeeks = postWeeks.length - missedWeeks;
+    return { member, paidWeeks, missedWeeks, paidAmount: paidWeeks * WEEKLY_PAYMENT };
+  });
+
+  const allocations: StakeAllocation[] = postWeeks.map((week) => {
+    const paidMembers = members.filter((m) => !missed.has(`${m}|${week}`)).length;
+    return { week, start: weekStart(t, week), paidMembers, amount: paidMembers * WEEKLY_STAKE };
+  });
+
+  let finesPaid = 0;
+  let finesOverdue = 0;
+  const finesByMember: FinesByMember = {};
+  for (const f of input.fines) {
+    const entry = finesByMember[f.member] ?? { paid: 0, overdue: 0 };
+    finesByMember[f.member] = entry;
+    if (f.paidAt) {
+      if (f.paidAt.getTime() >= cutoff.getTime()) {
+        finesPaid += f.amount;
+        entry.paid += f.amount;
+      }
+    } else if (f.fineDate.getTime() >= cutoff.getTime()) {
+      finesOverdue += f.amount;
+      entry.overdue += f.amount;
+    }
+  }
+
+  return {
+    cutoff,
+    postWeeks,
+    bets,
+    allocations,
+    paidMemberWeeks: payments.reduce((s, p) => s + p.paidWeeks, 0),
+    payments,
+    finesPaid: round2(finesPaid),
+    finesOverdue: round2(finesOverdue),
+    finesByMember,
+  };
+}
+
+/** Settled bets grouped by proposer. Each proposer is matched to a member name from the sheet, case-insensitively. */
+export function byProposer(t: Tracker, bets: SettledBet[]): ProposerTotals[] {
   const memberByKey = new Map(t.members.map((m) => [m.name.trim().toLowerCase(), m.name]));
-  const blank = (name: string): QueueAttribution => ({ name, bets: 0, won: 0, lost: 0, void: 0, staked: 0, returns: 0 });
-  const rows = new Map<string, QueueAttribution>(t.members.map((m) => [m.name, blank(m.name)]));
+  const blank = (name: string): ProposerTotals => ({ name, bets: 0, won: 0, lost: 0, void: 0, staked: 0, returns: 0 });
+  const rows = new Map<string, ProposerTotals>(t.members.map((m) => [m.name, blank(m.name)]));
   for (const b of bets) {
     const name = memberByKey.get(b.proposedBy.trim().toLowerCase()) ?? OTHER_PROPOSER;
     const row = rows.get(name) ?? blank(name);
@@ -321,46 +504,62 @@ export function queueByProposer(t: Tracker, bets: SettledQueueBet[]): QueueAttri
   return [...rows.values()].filter((r) => r.name !== OTHER_PROPOSER || r.bets > 0);
 }
 
+/** The most recently settled bets, newest first. */
+export function recentSettled(bets: SettledBet[], n = 10): SettledBet[] {
+  return [...bets].sort((a, b) => b.settledAt.getTime() - a.settledAt.getTime()).slice(0, n);
+}
+
 // ---------- totals ----------
 
 /**
- * Totals and KPIs. `queue` must already be filtered with includedQueueBets. Pass [] for spreadsheet-only figures.
- * Returns null if the paid-in figure or the target is missing from the sheet.
+ * Totals and KPIs. Pass emptyLedger() (or omit it) for spreadsheet-only figures. Returns null if the sheet's
+ * paid-in figure or target is missing.
  *
- * Pot formula (the sheet's own, extended for queue bets):
- *   pot = banked + punts + fines + interest
- *       = paidIn - staked + punts + fines + interest     (because banked = paidIn - staked, sheet identity)
- * With queue bets, punts = sheetPunts + queueReturns and staked = (paidIn - banked) + queueStakes, so
- *   pot = sheetPot + queueReturns - queueStakes
- * That is, each queue bet moves the pot by returns - stake: its stake leaves the pot when placed, and its
- * returns come back into it when it settles. Overall P&L = pot - paidIn = betPnl + fines + interest still holds.
+ * Money model (the sheet's own convention, extended to the post-cut-off ledger):
+ *   - Each paid member-week after the cut-off brings in WEEKLY_PAYMENT (5). WEEKLY_BANKED (2.50) of it is banked
+ *     and WEEKLY_STAKE (2.50) is allocated to staking. So paid in and staked both rise by the allocation, and
+ *     paid in minus banked = staked holds for the sheet and for the ledger.
+ *   - Bets are funded from that weekly stake. A queue bet or result does NOT reduce the pot or staked again:
+ *     its stake was already allocated when the payment came in. Only its returns move money: they add to punts.
+ *     Stakes placed are reported separately (placedStakes) so the leader can see when they exceed the allocation.
+ *   - Fines paid after the cut-off add to fines; unpaid fines given after the cut-off add to overdue (not to the pot).
  *
- * Average pot per week and the projected date use the spreadsheet's pot and weeks, so they describe the
- * spreadsheet's pace. Progress to target uses the full pot.
+ * Pot = banked + punts + fines + interest, which is the sheet's "Overall" formula. Equivalently
+ *   pot = paid in - staked + punts + fines + interest.
+ * Overall P&L = pot - paid in = bet P&L + fines + interest, so the identity holds.
+ *
+ * Average pot per week and the projected target date use the spreadsheet's own pot and weeks, so they describe
+ * the spreadsheet's pace. Progress to target uses the full pot.
  */
-export function computeStats(t: Tracker, queue: SettledQueueBet[] = []): Stats | null {
+export function computeStats(t: Tracker, ledger: Ledger = emptyLedger()): Stats | null {
   if (t.paidIn === null || t.target === null) return null;
   const weeks = t.weekNumbers.length;
   const members = t.members.length;
   const weekIdx = Array.from({ length: weeks }, (_, i) => i);
 
   const sheetPunts = t.members.reduce((s, m) => s + m.punts.reduce((a, b) => a + b, 0), 0);
-  const banked = t.members.reduce((s, m) => s + m.banked.reduce((a, b) => a + b, 0), 0);
-  const fines = t.members.reduce((s, m) => s + m.fines, 0);
-  const overdue = t.members.reduce((s, m) => s + m.overdue, 0);
+  const sheetBanked = t.members.reduce((s, m) => s + m.banked.reduce((a, b) => a + b, 0), 0);
+  const sheetFines = t.members.reduce((s, m) => s + m.fines, 0);
+  const sheetOverdue = t.members.reduce((s, m) => s + m.overdue, 0);
   const interest = t.summary.get("Intrest updated") ?? 0;
-  const paidIn = t.paidIn;
+  const sheetPot = sheetBanked + sheetPunts + sheetFines + interest;
 
-  const queueStaked = queue.reduce((s, b) => s + b.placedStake, 0);
-  const queueReturns = queue.reduce((s, b) => s + b.returns, 0);
-  const queueWon = queue.filter((b) => b.status === "settled_won").length;
-  const queueLost = queue.filter((b) => b.status === "settled_lost").length;
-  const queueVoid = queue.filter((b) => b.status === "settled_void").length;
+  const pmw = ledger.paidMemberWeeks;
+  const allocated = ledger.allocations.reduce((s, a) => s + a.amount, 0);
+  const paidIn = t.paidIn + WEEKLY_PAYMENT * pmw;
+  const banked = sheetBanked + WEEKLY_BANKED * pmw;
+  const staked = t.paidIn - sheetBanked + allocated;
 
-  const punts = sheetPunts + queueReturns;
-  const staked = paidIn - banked + queueStaked;
-  const pot = banked + punts + fines + interest - queueStaked;
-  const sheetPot = banked + sheetPunts + fines + interest;
+  const settledReturns = ledger.bets.reduce((s, b) => s + b.returns, 0);
+  const placedStakes = ledger.bets.reduce((s, b) => s + b.placedStake, 0);
+  const settledWon = ledger.bets.filter((b) => b.status === "settled_won").length;
+  const settledLost = ledger.bets.filter((b) => b.status === "settled_lost").length;
+  const settledVoid = ledger.bets.filter((b) => b.status === "settled_void").length;
+
+  const punts = sheetPunts + settledReturns;
+  const fines = sheetFines + ledger.finesPaid;
+  const overdue = sheetOverdue + ledger.finesOverdue;
+  const pot = banked + punts + fines + interest;
   const betPnl = punts - staked;
   const overallPnl = pot - paidIn;
   const avgPotPerWeek = weeks ? sheetPot / weeks : 0;
@@ -383,14 +582,17 @@ export function computeStats(t: Tracker, queue: SettledQueueBet[] = []): Stats |
     ...weekIdx.map((i) => t.members.reduce((s, m) => s + num(m.punts[i]), 0)),
   );
 
-  const decided = queueWon + queueLost;
+  const decided = settledWon + settledLost;
   return {
     members,
     weeks,
+    postWeeks: ledger.postWeeks.length,
+    paidMemberWeeks: pmw,
     paidIn,
     banked,
     punts,
     staked,
+    placedStakes,
     fines,
     overdue,
     interest,
@@ -408,21 +610,21 @@ export function computeStats(t: Tracker, queue: SettledQueueBet[] = []): Stats |
     memberWeeks: members * weeks,
     bestPunt,
     bestWeek,
-    queueBets: queue.length,
-    queueWon,
-    queueLost,
-    queueVoid,
-    queueStaked,
-    queueReturns,
-    queueStrikeRate: decided ? queueWon / decided : null,
+    settledBets: ledger.bets.length,
+    settledWon,
+    settledLost,
+    settledVoid,
+    settledReturns,
+    strikeRate: decided ? settledWon / decided : null,
   };
 }
 
 // ---------- series and breakdowns ----------
 
-/** One point per played week, with cumulative bet P&L (spreadsheet only). */
-export function weeklySeries(t: Tracker, s: Stats): WeekPoint[] {
-  const paidInPerWeek = s.weeks ? s.paidIn / s.weeks : 0;
+/** One point per sheet week, with cumulative bet P&L (spreadsheet only). */
+export function weeklySeries(t: Tracker): WeekPoint[] {
+  // The sheet's paid in is shared evenly across its weeks; this matches the sheet's own staked figure in total.
+  const paidInPerWeek = t.weekNumbers.length && t.paidIn !== null ? t.paidIn / t.weekNumbers.length : 0;
   let cum = 0;
   return t.weekNumbers.map((week, i) => {
     const punts = t.members.reduce((acc, m) => acc + num(m.punts[i]), 0);
@@ -436,22 +638,51 @@ export function weeklySeries(t: Tracker, s: Stats): WeekPoint[] {
 }
 
 /**
- * Cumulative bet P&L: one point per spreadsheet week, then one point per included queue bet in settled order.
- * Each queue bet adds returns - stake. The last point equals computeStats().betPnl.
+ * Cumulative bet P&L in date order: the sheet's weeks, then after the cut-off each week's stake allocation
+ * (a step down) and each settled bet (its returns, a step up). The last point equals computeStats().betPnl.
  */
-export function cumulativeSeries(weeks: WeekPoint[], queue: SettledQueueBet[]): CumulativePoint[] {
+export function cumulativeSeries(
+  weeks: WeekPoint[],
+  bets: SettledBet[],
+  allocations: StakeAllocation[] = [],
+): CumulativePoint[] {
   const points: CumulativePoint[] = weeks.map((w) => ({ x: `Wk ${w.week}`, cum: w.cumBetPnl, week: w }));
+  type Event = { at: number; apply: (cum: number) => number; point: Omit<CumulativePoint, "cum"> };
+  const events: Event[] = [
+    ...allocations.map((a) => ({
+      at: a.start?.getTime() ?? 0,
+      apply: (cum: number) => cum - a.amount,
+      point: { x: `Wk ${a.week} stakes`, allocation: a },
+    })),
+    ...bets.map((b) => ({
+      at: b.settledAt.getTime(),
+      apply: (cum: number) => cum + b.returns,
+      point: { x: "", bet: b },
+    })),
+  ].sort((a, b) => a.at - b.at);
   let cum = weeks.at(-1)?.cumBetPnl ?? 0;
-  const ordered = [...queue].sort((a, b) => a.settledAt.getTime() - b.settledAt.getTime());
-  ordered.forEach((bet, i) => {
-    cum += bet.returns - bet.placedStake;
-    points.push({ x: `Bet ${i + 1}`, cum, bet });
-  });
+  let betNo = 0;
+  for (const e of events) {
+    cum = round2(e.apply(cum));
+    if (e.point.bet) {
+      betNo += 1;
+      points.push({ ...e.point, x: `Bet ${betNo}`, cum });
+    } else {
+      points.push({ ...e.point, cum });
+    }
+  }
   return points;
 }
 
-/** Weekly points grouped by calendar month. Queue bets are grouped by the month they settled in. */
-export function monthlySeries(weeks: WeekPoint[], queue: SettledQueueBet[] = []): MonthPoint[] {
+/**
+ * Weekly points grouped by calendar month. Settled bets count their returns in the month they settled.
+ * Stake allocations after the cut-off count as staked in the month of their week.
+ */
+export function monthlySeries(
+  weeks: WeekPoint[],
+  bets: SettledBet[] = [],
+  allocations: StakeAllocation[] = [],
+): MonthPoint[] {
   const byMonth = new Map<string, MonthPoint>();
   const monthFor = (key: string): MonthPoint => {
     const existing = byMonth.get(key);
@@ -475,27 +706,37 @@ export function monthlySeries(weeks: WeekPoint[], queue: SettledQueueBet[] = [])
     m.staked += w.staked;
     m.betPnl += w.betPnl;
   }
-  for (const b of queue) {
+  for (const a of allocations) {
+    const key = monthKey(a.start);
+    if (!key) continue;
+    const m = monthFor(key);
+    m.staked += a.amount;
+    m.betPnl -= a.amount;
+  }
+  for (const b of bets) {
     const key = monthKey(b.settledAt);
     if (!key) continue;
     const m = monthFor(key);
     m.punts += b.returns;
-    m.staked += b.placedStake;
-    m.betPnl += b.returns - b.placedStake;
+    m.betPnl += b.returns;
   }
   return [...byMonth.values()].sort((a, b) => a.month.localeCompare(b.month));
 }
 
-/** Per-member figures. Pot share and paid-in share are equal (every member pays the same). */
-export function memberStats(t: Tracker, s: Stats, queue: SettledQueueBet[] = []): MemberStat[] {
+/** Per-member figures. The pot is split equally; paid in follows each member's own post-cut-off payments. */
+export function memberStats(t: Tracker, s: Stats, ledger: Ledger = emptyLedger()): MemberStat[] {
   const potShare = s.members ? s.pot / s.members : 0;
-  const paidShare = s.members ? s.paidIn / s.members : 0;
-  const attributed = new Map(queueByProposer(t, queue).map((a) => [a.name, a.returns]));
+  const sheetPaidShare = s.members ? (t.paidIn ?? 0) / s.members : 0;
+  const attributed = new Map(byProposer(t, ledger.bets).map((a) => [a.name, a.returns]));
+  const paidWeeks = new Map(ledger.payments.map((p) => [p.member, p.paidWeeks]));
   return t.members
     .map((m) => {
       const sheetPunts = m.punts.reduce((a, b) => a + b, 0);
       const queueReturns = attributed.get(m.name) ?? 0;
-      const banked = m.banked.reduce((a, b) => a + b, 0);
+      const pw = paidWeeks.get(m.name) ?? 0;
+      const sheetBanked = m.banked.reduce((a, b) => a + b, 0);
+      const fines = ledger.finesByMember[m.name];
+      const paidIn = sheetPaidShare + WEEKLY_PAYMENT * pw;
       return {
         name: m.name,
         punts: sheetPunts + queueReturns,
@@ -503,12 +744,12 @@ export function memberStats(t: Tracker, s: Stats, queue: SettledQueueBet[] = [])
         puntsShare: s.punts ? (sheetPunts + queueReturns) / s.punts : 0,
         weeksWithReturn: m.punts.filter((p) => p > 0).length,
         bestPunt: Math.max(0, ...m.punts),
-        fines: m.fines,
-        overdue: m.overdue,
-        banked,
-        paidIn: paidShare,
+        fines: m.fines + (fines?.paid ?? 0),
+        overdue: m.overdue + (fines?.overdue ?? 0),
+        banked: sheetBanked + WEEKLY_BANKED * pw,
+        paidIn,
         potShare,
-        pnl: potShare - paidShare,
+        pnl: potShare - paidIn,
       };
     })
     .sort((a, b) => b.punts - a.punts);
