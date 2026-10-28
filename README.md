@@ -5,13 +5,11 @@ a read-only view of the tracker spreadsheet plus a bet queue for proposing, appr
 
 ## Status
 
-- **Spreadsheet import is not yet populated.** The uploaded `Copy_of_TWICHOL.xlsx` is an
-  encrypted / rights-managed file (header `MSMAMARPCRYPT`, AES encrypted), so it cannot be read.
-  `data/index.json` is an empty placeholder until a readable copy is imported.
-  To fix: open the file in Excel, remove the protection (File > Info > Protect Workbook / Restrict Access),
-  Save As a new `.xlsx`, then follow "Re-importing the spreadsheet" below.
-- The dashboard KPIs and charts (P&L over time, breakdowns) and the members page are **not yet built**.
-  They depend on the real column names, which can only be confirmed after import.
+- The spreadsheet is imported (`data/`): the dashboard, the Members page and a page per sheet are built from it.
+- The dashboard figures come from the `TWOL (New)` sheet (weekly punts, banked, fines, summary cells). The
+  `TWOL (Old)` sheet is an earlier 10-week snapshot and is not used in the totals.
+- The workbook has **no per-bet stakes, odds, sports, markets or bet types**, so strike rate per bet, ROI per bet
+  and sport/market/bet-type breakdowns are not available. The dashboard says so.
 
 ## Running locally
 
@@ -32,7 +30,10 @@ python3 scripts/import-xlsx.py path/to/Copy_of_TWICHOL.xlsx
 git add data && git commit -m "Update syndicate data" && git push
 ```
 
-The script writes one `data/<sheet>.json` per sheet plus `data/index.json`.
+The script writes one `data/<sheet>.json` per sheet plus `data/index.json`. Each sheet JSON has `tables`
+(title, cell range, columns, rows). The `TWOL (New)` tracker is parsed by its labels (Punts, Fines Paid, Banked,
+Leaderboard Source, Week total), not fixed row numbers. The dashboard computes its figures in `lib/stats.ts`
+(pure functions, no file access), and the dashboard's checks compare them against the sheet's own totals.
 
 Privacy: columns whose headers look like personal or banking data (bank/sort code/account numbers, phone,
 e-mail, address, postcode, date of birth, passport, NI number, passwords, card details) are **dropped** from the
@@ -111,21 +112,22 @@ Bet statuses: Proposed → Approved → Placed → Settled (Won / Lost / Void).
 ```
 app/
   layout.tsx          root layout + nav bar
-  page.tsx            dashboard (sheet overview; KPIs pending import)
+  page.tsx            dashboard: KPIs, cumulative P&L, monthly and member breakdowns, checks
   data/[slug]/page.tsx  one page per spreadsheet sheet (sortable, searchable table)
   bets/page.tsx       bet queue page
 components/
   NavBar.tsx          navigation (dark mode follows the OS setting)
+  CumulativeChart.tsx, BarChart.tsx   Recharts charts (single series, dark mode via chartTheme.ts)
   DataTable.tsx       client-side sortable/searchable table
   BetQueue.tsx        bet queue UI (API-backed, localStorage fallback)
 app/api/bets/         bet queue API (GET/POST, PATCH by id)
 db/
   schema.sql          bets table and indexes
 lib/
-  bets.ts             bet types and pure helpers (client-safe)
+  bets.ts             bet types, status flow, copy-to-clipboard text (client-safe)
   db.ts               server-only database access and validation
   data.ts             server-side loader for data/*.json
-  bets.ts             bet types, status flow, copy-to-clipboard text
+  stats.ts            pure tracker statistics, monthly/member breakdowns, reconciliation
 scripts/import-xlsx.py  spreadsheet -> data/*.json converter
 data/                 generated JSON (committed)
 ```

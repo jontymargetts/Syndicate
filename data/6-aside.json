@@ -1,0 +1,313 @@
+{
+  "name": "6 aside",
+  "kind": "tournament",
+  "tables": [
+    {
+      "title": "Clubs and teams",
+      "range": "A2:F15",
+      "columns": [
+        "PN",
+        "Club",
+        "Number of teams"
+      ],
+      "rows": [
+        {
+          "PN": "Y",
+          "Club": "Capel",
+          "Number of teams": 1
+        },
+        {
+          "PN": "Emailed",
+          "Club": "Purley CC",
+          "Number of teams": 2
+        },
+        {
+          "PN": "Emailed",
+          "Club": "SinjunGrammarians CC",
+          "Number of teams": 1
+        },
+        {
+          "PN": "n",
+          "Club": "Thames ditton",
+          "Number of teams": 1
+        },
+        {
+          "PN": "y",
+          "Club": "Richmond cc girls",
+          "Number of teams": 1
+        },
+        {
+          "PN": "n",
+          "Club": null,
+          "Number of teams": 1
+        },
+        {
+          "PN": "Emailed",
+          "Club": "Dulwich",
+          "Number of teams": 1
+        },
+        {
+          "PN": "Emailed",
+          "Club": "Woking and horsell CC",
+          "Number of teams": 1
+        },
+        {
+          "PN": "Emailed",
+          "Club": null,
+          "Number of teams": 1
+        },
+        {
+          "PN": "n",
+          "Club": "Wallington",
+          "Number of teams": 1
+        },
+        {
+          "PN": "n",
+          "Club": "AJ cricket academy",
+          "Number of teams": 1
+        },
+        {
+          "PN": "n",
+          "Club": "Smcc",
+          "Number of teams": 1
+        },
+        {
+          "PN": "Y",
+          "Club": "Pyrford",
+          "Number of teams": 1
+        }
+      ]
+    },
+    {
+      "title": "6-A-SIDE TOURNAMENT SUNDAY 14th JUNE 2026 RESPONSIBILITY TABLE",
+      "range": "H4:J81",
+      "columns": [
+        "Task",
+        "Item / query / notes",
+        "Responsibility"
+      ],
+      "rows": [
+        {
+          "Task": "TEAMS",
+          "Item / query / notes": "INVITE TEAMS & MANAGE INFORMATION ISSUE, ETC.",
+          "Responsibility": "Oli"
+        },
+        {
+          "Task": "TEAMS",
+          "Item / query / notes": "ORGANISE 2  U9 CAPEL TEAMS",
+          "Responsibility": "Oli"
+        },
+        {
+          "Task": "TEAMS",
+          "Item / query / notes": "TEAM REGISTRATION ON THE DAY",
+          "Responsibility": "Oli"
+        },
+        {
+          "Task": "PROGRAMME",
+          "Item / query / notes": "FORMULATE TEAM GROUPINGS AND ORDER OF PLAY, PRODUCE PROGRAMME AND PRINT",
+          "Responsibility": "TBD"
+        },
+        {
+          "Task": "LARGE SCORESHEETS",
+          "Item / query / notes": "PRODUCE A1 SIZE SCORESHEETS FROM PROGRAMME INFO & PRINT",
+          "Responsibility": "TBD"
+        },
+        {
+          "Task": "LARGE SCORESHEETS",
+          "Item / query / notes": "PLACE BOARDS FOR THE DAY",
+          "Responsibility": null
+        },
+        {
+          "Task": "BBQ",
+          "Item / query / notes": "NORMAL FLAT BED BBQ HIRE FROM DORKING OR BORROW FROM GUIDES?",
+          "Responsibility": "Mike"
+        },
+        {
+          "Task": "BBQ",
+          "Item / query / notes": "BUY FOOD AND OTHER SUPPLIES",
+          "Responsibility": "Ben"
+        },
+        {
+          "Task": "BBQ",
+          "Item / query / notes": "ORGANISE HELPERS & OPERATE ON THE DAY",
+          "Responsibility": "Mike"
+        },
+        {
+          "Task": "TUCK SHOP (SOFT DRINKS, SWEETS, ICE CREAMS,  ETC OUTSIDE)",
+          "Item / query / notes": "BUY SUPPLIES",
+          "Responsibility": "Beth ([phone removed]) guides"
+        },
+        {
+          "Task": "TUCK SHOP (SOFT DRINKS, SWEETS, ICE CREAMS,  ETC OUTSIDE)",
+          "Item / query / notes": "ORGANISE HELPERS & OPERATE ON THE DAY",
+          "Responsibility": null
+        },
+        {
+          "Task": "PITCHES",
+          "Item / query / notes": "AGREE LENGTHS",
+          "Responsibility": "Oli"
+        },
+        {
+          "Task": "PITCHES",
+          "Item / query / notes": "MOW STRIPS",
+          "Responsibility": "Oli"
+        },
+        {
+          "Task": "PITCHES",
+          "Item / query / notes": "HELP ROLL STRIPS IN SAY LAST 2 WEEKS",
+          "Responsibility": "Oli"
+        },
+        {
+          "Task": "PITCHES",
+          "Item / query / notes": "MARK OUT & SET UP ROPES ETC ON THE DAY",
+          "Responsibility": "Oli"
+        },
+        {
+          "Task": "REFRESHMENTS (TEAS, COFFEES, CAKES, ETC IN THE PAVILION",
+          "Item / query / notes": "BUY FOOD AND OTHER SUPPLIES",
+          "Responsibility": "Julie van?"
+        },
+        {
+          "Task": "REFRESHMENTS (TEAS, COFFEES, CAKES, ETC IN THE PAVILION",
+          "Item / query / notes": "ORGANISE HELPERS & OPERATE ON THE DAY",
+          "Responsibility": null
+        },
+        {
+          "Task": "BAR",
+          "Item / query / notes": "ORGANISE STAFF (SAY FROM 12.00?)",
+          "Responsibility": "Paul"
+        },
+        {
+          "Task": "PUBLIC ADDRESS",
+          "Item / query / notes": "ALREADY BOOKED",
+          "Responsibility": "TWIC Plus phil/tom"
+        },
+        {
+          "Task": "PUBLIC ADDRESS",
+          "Item / query / notes": "LIAISE WITH PA ALL DAY TO KEEP AN EYE ON MATCHES SCHEDULE AND PROMPT ANNOUNCEMENTS. LIAISE WITH TEAM MANAGERS AS NECESSARY",
+          "Responsibility": null
+        },
+        {
+          "Task": "PUBLIC ADDRESS",
+          "Item / query / notes": "MANAGE SCORES ON THE DAY, ENSURE SCOREBORDS MAINTAINED UP TO DATE; SORT OUT SEMI -FINALS & FINALS TEAMS",
+          "Responsibility": null
+        },
+        {
+          "Task": "SCORING TENTS",
+          "Item / query / notes": "CHECK TENTS OK (IN STORE ROOM)",
+          "Responsibility": "Brad"
+        },
+        {
+          "Task": "SCORING TABLES AND TABLES FOR BBQ, PA & REFRESHMENTS (8 REQUIRED)",
+          "Item / query / notes": "BOOK WITH (VILLAGE HALL)",
+          "Responsibility": "Oli"
+        },
+        {
+          "Task": "SCORING TABLES AND TABLES FOR BBQ, PA & REFRESHMENTS (8 REQUIRED)",
+          "Item / query / notes": "COLLECT AND SET UP",
+          "Responsibility": "Guzz"
+        },
+        {
+          "Task": "SCORING TABLES AND TABLES FOR BBQ, PA & REFRESHMENTS (8 REQUIRED)",
+          "Item / query / notes": "REMOVE AND RETURN",
+          "Responsibility": "All"
+        },
+        {
+          "Task": "TROPHIES",
+          "Item / query / notes": "REMIND LAST YEARS WINNERS TO ENGRAVE & RETURN",
+          "Responsibility": "Tom Ware"
+        },
+        {
+          "Task": "TROPHIES",
+          "Item / query / notes": "PURCHASE TROPHIES & MEDALS",
+          "Responsibility": "Tom Ware"
+        },
+        {
+          "Task": "STUMPS, BALLS, EQUIPMENT",
+          "Item / query / notes": "CHECK THAT WE HAVE 3 SETS OF DECENT SPRINGBACKS + BAILS",
+          "Responsibility": "Oli"
+        },
+        {
+          "Task": "STUMPS, BALLS, EQUIPMENT",
+          "Item / query / notes": "PURCHASE BOX OF 'INCREDIBALLS' IF  NEEDED",
+          "Responsibility": "Oli"
+        },
+        {
+          "Task": "STUMPS, BALLS, EQUIPMENT",
+          "Item / query / notes": "ORGANISE 3 SCOREBOARDS (IN GARAGE), DISTRIBUTE ON DAY",
+          "Responsibility": "Brad"
+        },
+        {
+          "Task": "UMPIRES",
+          "Item / query / notes": "SEEK UMPIRES FOR THE DAY",
+          "Responsibility": "Brad guzz  mike"
+        },
+        {
+          "Task": "SCORING",
+          "Item / query / notes": "PRINT SCORE SHEETS",
+          "Responsibility": "Brad"
+        },
+        {
+          "Task": "SCORING",
+          "Item / query / notes": "SEEK SCORERS",
+          "Responsibility": "All"
+        },
+        {
+          "Task": "SCORING",
+          "Item / query / notes": "Buy scoring supplies",
+          "Responsibility": "Brad"
+        },
+        {
+          "Task": "BOTTLE TOMBOLA",
+          "Item / query / notes": "SEEK BOTTLES, STICK TICKETS, RUN ON DAY",
+          "Responsibility": "Ant"
+        },
+        {
+          "Task": "BOTTLE TOMBOLA",
+          "Item / query / notes": "BUY RAFFLE TICKETS",
+          "Responsibility": "Ant"
+        },
+        {
+          "Task": "FINANCE",
+          "Item / query / notes": "RECEIVE INCOME, COUNT & BANK",
+          "Responsibility": "Rich"
+        },
+        {
+          "Task": "SIGNS & BUNTING",
+          "Item / query / notes": "CHECK EXISTING SIGNS & PRINT THOSE REQUIRED",
+          "Responsibility": "Rhiannon"
+        },
+        {
+          "Task": "RUBBISH BINS",
+          "Item / query / notes": "Al bin jobs",
+          "Responsibility": "Guzz"
+        },
+        {
+          "Task": "CAR PARKING",
+          "Item / query / notes": "Organise Car park",
+          "Responsibility": "Oli to ask bryn to ask clay"
+        },
+        {
+          "Task": "CAR PARKING",
+          "Item / query / notes": "DIRECT TRAFFIC FIRST THING",
+          "Responsibility": "Mike"
+        },
+        {
+          "Task": "Toilets",
+          "Item / query / notes": "Ask an adult if we are okay to use club",
+          "Responsibility": "Oli"
+        },
+        {
+          "Task": "FIRST AID",
+          "Item / query / notes": "GET DAVE TO CHECK CONTENTS OF BOXES",
+          "Responsibility": "Ben to adult"
+        },
+        {
+          "Task": "FIRST AID",
+          "Item / query / notes": "MAKE SURE WE HAVE ICE-PACKS FOR THE DAY",
+          "Responsibility": "Ben to adult"
+        }
+      ]
+    }
+  ]
+}

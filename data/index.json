@@ -1,6 +1,54 @@
 {
-  "source": null,
-  "importedAt": null,
-  "sheets": [],
-  "omittedColumns": {}
+  "source": "1735ef2d-Copy_of_TWICHOL.xlsx",
+  "importedAt": "2026-10-28T12:14:29+00:00",
+  "sheets": [
+    {
+      "name": "TWOL (New)",
+      "slug": "twol-new",
+      "kind": "tracker",
+      "tableCount": 5,
+      "rowCount": 96,
+      "columnCount": 88
+    },
+    {
+      "name": "TWOL (Old)",
+      "slug": "twol-old",
+      "kind": "tracker",
+      "tableCount": 4,
+      "rowCount": 71,
+      "columnCount": 88
+    },
+    {
+      "name": "6 aside",
+      "slug": "6-aside",
+      "kind": "tournament",
+      "tableCount": 2,
+      "rowCount": 57,
+      "columnCount": 3
+    },
+    {
+      "name": "Sheet2",
+      "slug": "sheet2",
+      "kind": "grid",
+      "tableCount": 4,
+      "rowCount": 39,
+      "columnCount": 4
+    },
+    {
+      "name": "Sheet3",
+      "slug": "sheet3",
+      "kind": "empty",
+      "tableCount": 0,
+      "rowCount": 0,
+      "columnCount": 0
+    }
+  ],
+  "omittedColumns": {
+    "6 aside": [
+      "Contact name",
+      "Email",
+      "Phone number"
+    ]
+  },
+  "formulasWithoutCachedValue": 0
 }
