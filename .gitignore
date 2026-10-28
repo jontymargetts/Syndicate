@@ -1,0 +1,19 @@
+# dependencies
+node_modules/
+
+# next.js build output
+.next/
+out/
+build/
+next-env.d.ts
+
+# misc
+.DS_Store
+*.pem
+npm-debug.log*
+.env*.local
+.vercel
+
+# Never commit the raw spreadsheet (it is read only by scripts/import-xlsx.py)
+*.xlsx
+*.xls
