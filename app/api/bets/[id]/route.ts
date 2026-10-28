@@ -5,7 +5,8 @@ export const dynamic = "force-dynamic";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// PATCH /api/bets/:id: advance status and record placed/settled details. There is no DELETE.
+// PATCH /api/bets/:id: advance status and record placed/settled details. When settling, returns are
+// computed here unless supplied (see updateBet in lib/db.ts). There is no DELETE.
 export async function PATCH(request: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
   if (!UUID.test(id)) {
@@ -33,6 +34,8 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
         return NextResponse.json({ error: "not_found", message: "Bet not found." }, { status: 404 });
       case "invalid":
         return NextResponse.json({ error: "invalid_transition", message: result.error }, { status: 409 });
+      case "invalid_input":
+        return NextResponse.json({ error: "validation", message: result.error }, { status: 400 });
       case "conflict":
         return NextResponse.json({ error: "conflict", message: "The bet changed while you were editing. Refresh and try again." }, { status: 409 });
     }

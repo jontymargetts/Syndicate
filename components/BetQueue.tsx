@@ -12,14 +12,20 @@ import {
   STATUSES,
   STATUS_LABEL,
   STORAGE_KEY,
+  type SettledStatus,
+  autoReturns,
   betSummary,
   formatMoney,
+  isSettledStatus,
   isValidBetInput,
   newId,
+  parseOdds,
   potentialReturn,
+  resolveReturns,
 } from "@/lib/bets";
 
 const BET365_URL = "https://www.bet365.com";
+const ODDS_HINT = "Odds must be decimal (2.50) or fractional (5/2), greater than 1.00.";
 
 function loadBets(): Bet[] {
   try {
@@ -73,6 +79,8 @@ export default function BetQueue() {
   const [filter, setFilter] = useState<BetStatus | "all">("all");
   const [placingId, setPlacingId] = useState<string | null>(null);
   const [placeForm, setPlaceForm] = useState({ odds: "", stake: "" });
+  // Optional returns typed when settling, per bet id. Blank means the automatic value.
+  const [returnsDraft, setReturnsDraft] = useState<Record<string, string>>({});
   const [notice, setNotice] = useState<string | null>(null);
 
   // Fetch the shared queue. A 503 means no database is configured: keep the local queue instead.
@@ -129,28 +137,55 @@ export default function BetQueue() {
   }
 
   // Apply a status/placed/settled change: via the API when shared, locally otherwise.
-  async function changeBet(bet: Bet, patch: Partial<Bet>) {
+  // Returns true when the change was saved.
+  async function changeBet(bet: Bet, patch: Partial<Bet>): Promise<boolean> {
     if (mode === "local") {
+      const settled = patch.status;
+      if (settled && isSettledStatus(settled)) {
+        if (bet.placedOdds === undefined || bet.placedStake === undefined) {
+          setNotice("Mark the bet as placed (with the actual odds and stake) before settling it.");
+          return false;
+        }
+        const resolved = resolveReturns({
+          status: settled,
+          placedStake: bet.placedStake,
+          placedOdds: bet.placedOdds,
+          override: patch.returns,
+        });
+        if (!resolved.ok) {
+          setNotice(resolved.error);
+          return false;
+        }
+        update(bet.id, { ...patch, returns: resolved.value });
+        return true;
+      }
       update(bet.id, patch);
-      return;
+      return true;
     }
+    let ok = false;
     try {
       const res = await fetch(`/api/bets/${bet.id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(patch),
       });
-      if (!res.ok) setNotice(await errorMessage(res));
+      if (res.ok) ok = true;
+      else setNotice(await errorMessage(res));
     } catch {
       setNotice("Could not save the change. Check your connection and try again.");
     }
     await refresh();
+    return ok;
   }
 
   async function submitProposal(e: React.FormEvent) {
     e.preventDefault();
-    const odds = Number(form.odds);
+    const odds = parseOdds(form.odds);
     const stake = Number(form.stake);
+    if (odds === null) {
+      setFormError(ODDS_HINT);
+      return;
+    }
     const err = isValidBetInput({ event: form.event, selection: form.selection, odds, stake });
     if (err) {
       setFormError(err);
@@ -206,15 +241,35 @@ export default function BetQueue() {
   }
 
   function confirmPlaced(bet: Bet) {
-    const odds = Number(placeForm.odds);
+    const odds = parseOdds(placeForm.odds);
     const stake = Number(placeForm.stake);
-    if (!Number.isFinite(odds) || odds <= 1 || !Number.isFinite(stake) || stake <= 0) {
-      setNotice("Enter the actual odds (greater than 1.00) and stake you placed.");
+    if (odds === null || odds <= 1 || !Number.isFinite(stake) || stake <= 0) {
+      setNotice(`Enter the actual stake (GBP) and odds you placed. ${ODDS_HINT}`);
       return;
     }
     changeBet(bet, { status: "placed", placedOdds: odds, placedStake: stake, placedAt: new Date().toISOString() });
     setPlacingId(null);
     setNotice(null);
+  }
+
+  // One click settles the bet. Returns are worked out automatically unless one was typed in.
+  async function settle(bet: Bet, status: SettledStatus) {
+    const typed = (returnsDraft[bet.id] ?? "").trim().replace(/^£/, "");
+    let override: number | undefined;
+    if (typed !== "") {
+      override = Number(typed);
+      if (!Number.isFinite(override) || override < 0) {
+        setNotice("Returns must be an amount in pounds, for example 7.50, or left blank.");
+        return;
+      }
+    }
+    const patch: Partial<Bet> = { status, settledAt: new Date().toISOString() };
+    if (override !== undefined) patch.returns = override;
+    const ok = await changeBet(bet, patch);
+    if (ok) {
+      setReturnsDraft((prev) => ({ ...prev, [bet.id]: "" }));
+      setNotice(null);
+    }
   }
 
   // Local fallback only: the shared database has no delete endpoint.
@@ -255,16 +310,16 @@ export default function BetQueue() {
             <input className={inputClass} value={form.selection} onChange={(e) => setForm({ ...form, selection: e.target.value })} placeholder="e.g. Arsenal to win" />
           </label>
           <label className="space-y-1 text-sm">
-            <span className="text-slate-600 dark:text-slate-300">Odds (decimal) *</span>
-            <input className={inputClass} inputMode="decimal" value={form.odds} onChange={(e) => setForm({ ...form, odds: e.target.value })} placeholder="2.50" />
+            <span className="text-slate-600 dark:text-slate-300">Odds *</span>
+            <input className={inputClass} value={form.odds} onChange={(e) => setForm({ ...form, odds: e.target.value })} placeholder="2.50 or 5/2" />
           </label>
           <label className="space-y-1 text-sm">
             <span className="text-slate-600 dark:text-slate-300">Stake (GBP) *</span>
-            <input className={inputClass} inputMode="decimal" value={form.stake} onChange={(e) => setForm({ ...form, stake: e.target.value })} placeholder="10" />
+            <input className={inputClass} inputMode="decimal" value={form.stake} onChange={(e) => setForm({ ...form, stake: e.target.value })} placeholder="2.50" />
           </label>
           <label className="space-y-1 text-sm">
             <span className="text-slate-600 dark:text-slate-300">Proposed by</span>
-            <input className={inputClass} value={form.proposedBy} onChange={(e) => setForm({ ...form, proposedBy: e.target.value })} placeholder="Your name" />
+            <input className={inputClass} value={form.proposedBy} onChange={(e) => setForm({ ...form, proposedBy: e.target.value })} placeholder="Your first name" />
           </label>
           <label className="space-y-1 text-sm sm:col-span-2 lg:col-span-3">
             <span className="text-slate-600 dark:text-slate-300">Notes</span>
@@ -321,7 +376,13 @@ export default function BetQueue() {
         )}
 
         <ul className="grid gap-4 lg:grid-cols-2">
-          {visible.map((bet) => (
+          {visible.map((bet) => {
+            const canSettle = NEXT_ACTIONS[bet.status].some((a) => a.startsWith("settle"));
+            const placed =
+              bet.placedOdds !== undefined && bet.placedStake !== undefined
+                ? { odds: bet.placedOdds, stake: bet.placedStake }
+                : null;
+            return (
             <li key={bet.id} className="space-y-3 rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <div>
@@ -361,6 +422,17 @@ export default function BetQueue() {
                     </dd>
                   </div>
                 )}
+                {isSettledStatus(bet.status) && bet.returns !== undefined && (
+                  <div>
+                    <dt className="text-slate-500 dark:text-slate-400">Returned</dt>
+                    <dd>
+                      {formatMoney(bet.returns)}
+                      {bet.placedStake !== undefined && (
+                        <span className="text-slate-500 dark:text-slate-400"> ({formatMoney(bet.returns - bet.placedStake)} profit)</span>
+                      )}
+                    </dd>
+                  </div>
+                )}
               </dl>
 
               {bet.notes && <p className="text-sm text-slate-600 dark:text-slate-300">{bet.notes}</p>}
@@ -369,7 +441,7 @@ export default function BetQueue() {
                 <div className="grid grid-cols-2 gap-2 rounded-md bg-slate-50 p-3 dark:bg-slate-800">
                   <label className="space-y-1 text-sm">
                     <span className="text-slate-600 dark:text-slate-300">Actual odds</span>
-                    <input className={inputClass} inputMode="decimal" value={placeForm.odds} onChange={(e) => setPlaceForm({ ...placeForm, odds: e.target.value })} />
+                    <input className={inputClass} value={placeForm.odds} placeholder="2.50 or 5/2" onChange={(e) => setPlaceForm({ ...placeForm, odds: e.target.value })} />
                   </label>
                   <label className="space-y-1 text-sm">
                     <span className="text-slate-600 dark:text-slate-300">Actual stake (GBP)</span>
@@ -386,6 +458,26 @@ export default function BetQueue() {
                 </div>
               )}
 
+              {canSettle && placed && (
+                <div className="space-y-2 rounded-md bg-slate-50 p-3 text-sm dark:bg-slate-800">
+                  <p className="text-slate-600 dark:text-slate-300">
+                    Automatic returns: won {formatMoney(autoReturns("settled_won", placed.stake, placed.odds))}, lost{" "}
+                    {formatMoney(autoReturns("settled_lost", placed.stake, placed.odds))}, void{" "}
+                    {formatMoney(autoReturns("settled_void", placed.stake, placed.odds))} (stake back).
+                  </p>
+                  <label className="block space-y-1">
+                    <span className="text-slate-600 dark:text-slate-300">Edit returns (optional, for each-way or cash-out)</span>
+                    <input
+                      className={inputClass}
+                      inputMode="decimal"
+                      placeholder="Leave blank for automatic"
+                      value={returnsDraft[bet.id] ?? ""}
+                      onChange={(e) => setReturnsDraft({ ...returnsDraft, [bet.id]: e.target.value })}
+                    />
+                  </label>
+                </div>
+              )}
+
               <div className="flex flex-wrap gap-2 text-sm">
                 {NEXT_ACTIONS[bet.status].includes("approve") && (
                   <ActionButton onClick={() => changeBet(bet, { status: "approved" })}>Approve</ActionButton>
@@ -394,13 +486,13 @@ export default function BetQueue() {
                   <ActionButton onClick={() => startPlacing(bet)}>Mark as placed</ActionButton>
                 )}
                 {NEXT_ACTIONS[bet.status].includes("settle_won") && (
-                  <ActionButton onClick={() => changeBet(bet, { status: "settled_won", settledAt: new Date().toISOString() })}>Won</ActionButton>
+                  <ActionButton onClick={() => settle(bet, "settled_won")}>Won</ActionButton>
                 )}
                 {NEXT_ACTIONS[bet.status].includes("settle_lost") && (
-                  <ActionButton onClick={() => changeBet(bet, { status: "settled_lost", settledAt: new Date().toISOString() })}>Lost</ActionButton>
+                  <ActionButton onClick={() => settle(bet, "settled_lost")}>Lost</ActionButton>
                 )}
                 {NEXT_ACTIONS[bet.status].includes("settle_void") && (
-                  <ActionButton onClick={() => changeBet(bet, { status: "settled_void", settledAt: new Date().toISOString() })}>Void</ActionButton>
+                  <ActionButton onClick={() => settle(bet, "settled_void")}>Void</ActionButton>
                 )}
               </div>
 
@@ -423,7 +515,8 @@ export default function BetQueue() {
                 )}
               </div>
             </li>
-          ))}
+            );
+          })}
         </ul>
       </section>
     </div>

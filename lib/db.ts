@@ -5,7 +5,16 @@
 
 import { neon, type NeonQueryFunction } from "@neondatabase/serverless";
 import { NextResponse } from "next/server";
-import { type Bet, type BetStatus, STATUSES } from "@/lib/bets";
+import {
+  type Bet,
+  type BetStatus,
+  STATUSES,
+  autoReturns,
+  isSettledStatus,
+  parseOdds,
+  resolveReturns,
+} from "@/lib/bets";
+import type { SettledQueueBet } from "@/lib/stats";
 
 export type Sql = NeonQueryFunction<false, false>;
 type Row = Record<string, unknown>;
@@ -58,8 +67,6 @@ const NEXT_STATUS: Partial<Record<BetStatus, BetStatus[]>> = {
   approved: ["placed"],
   placed: ["settled_won", "settled_lost", "settled_void"],
 };
-
-const SETTLED: BetStatus[] = ["settled_won", "settled_lost", "settled_void"];
 
 export class DatabaseNotConfiguredError extends Error {}
 
@@ -139,7 +146,54 @@ export function rowToBet(row: Row): Bet {
   if (placedAt) bet.placedAt = placedAt;
   const settledAt = toIso(row.settled_at);
   if (settledAt) bet.settledAt = settledAt;
+  // Settled bets stored before returns were recorded get the automatic value.
+  const returns = toNum(row.returns);
+  if (returns !== undefined) bet.returns = returns;
+  else if (isSettledStatus(bet.status) && placedOdds !== undefined && placedStake !== undefined) {
+    bet.returns = autoReturns(bet.status, placedStake, placedOdds);
+  }
   return bet;
+}
+
+// Only fully settled bets with their figures can feed the dashboard.
+function toSettledQueueBet(bet: Bet): SettledQueueBet | null {
+  if (!isSettledStatus(bet.status)) return null;
+  if (bet.placedOdds === undefined || bet.placedStake === undefined || bet.returns === undefined || !bet.settledAt) {
+    return null;
+  }
+  return {
+    id: bet.id,
+    event: bet.event,
+    selection: bet.selection,
+    proposedBy: bet.proposedBy,
+    status: bet.status,
+    placedOdds: bet.placedOdds,
+    placedStake: bet.placedStake,
+    returns: bet.returns,
+    settledAt: new Date(bet.settledAt),
+  };
+}
+
+/**
+ * Settled queue bets for the dashboard and members pages, read at request time.
+ * Returns null when no database is configured or the query fails; callers then show spreadsheet-only figures.
+ */
+export async function fetchSettledQueueBets(): Promise<SettledQueueBet[] | null> {
+  if (!getDatabaseUrl()) return null;
+  try {
+    const sql = await readyDb();
+    const rows = (await sql.query(
+      `select * from bets
+       where status in ('won','lost','void') and settled_at is not null
+         and placed_odds is not null and placed_stake is not null
+       order by settled_at asc`,
+      [],
+    )) as Row[];
+    return rows.map(rowToBet).map(toSettledQueueBet).filter((b): b is SettledQueueBet => b !== null);
+  } catch (err) {
+    console.error("Bet queue unavailable; showing spreadsheet figures only:", err);
+    return null;
+  }
 }
 
 // ---------- input validation ----------
@@ -181,6 +235,19 @@ function readNumber(
   return { ok: true, value: n };
 }
 
+// Odds may be decimal (2.50 or "2.50") or fractional ("5/2"). Stored as decimal; must be greater than 1.00.
+function readOdds(body: Record<string, unknown>, key: string, required: boolean): Parsed<number | undefined> {
+  const raw = body[key];
+  if (raw === undefined || raw === null || raw === "") {
+    return required ? { ok: false, error: `${key} is required.` } : { ok: true, value: undefined };
+  }
+  const value = parseOdds(raw);
+  if (value === null || value <= 1 || value > 1000) {
+    return { ok: false, error: `${key} must be decimal odds (2.50) or fractional odds (5/2), greater than 1.00.` };
+  }
+  return { ok: true, value };
+}
+
 function readDate(body: Record<string, unknown>, key: string): Parsed<string | undefined> {
   const raw = body[key];
   if (raw === undefined || raw === null || raw === "") return { ok: true, value: undefined };
@@ -211,7 +278,7 @@ export function parseNewBet(body: unknown): Parsed<NewBet> {
   if (!proposedBy.ok) return proposedBy;
   const notes = readText(b, "notes", { max: 2000 });
   if (!notes.ok) return notes;
-  const odds = readNumber(b, "odds", { required: true, min: 1, max: 1000 });
+  const odds = readOdds(b, "odds", true);
   if (!odds.ok) return odds;
   const stake = readNumber(b, "stake", { required: true, min: 0, max: 1_000_000 });
   if (!stake.ok) return stake;
@@ -248,7 +315,7 @@ export function parseBetPatch(body: unknown): Parsed<BetPatch> {
     }
     patch.status = b.status as BetStatus;
   }
-  const placedOdds = readNumber(b, "placedOdds", { min: 1, max: 1000 });
+  const placedOdds = readOdds(b, "placedOdds", false);
   if (!placedOdds.ok) return placedOdds;
   const placedStake = readNumber(b, "placedStake", { min: 0, max: 1_000_000 });
   if (!placedStake.ok) return placedStake;
@@ -290,8 +357,15 @@ export type UpdateResult =
   | { kind: "ok"; bet: Bet }
   | { kind: "not_found" }
   | { kind: "invalid"; error: string }
+  | { kind: "invalid_input"; error: string }
   | { kind: "conflict" };
 
+/**
+ * Applies a PATCH. When a bet is settled, returns are set here, on the server:
+ *   - no returns in the patch: won = stake x odds, lost = 0, void = stake (see resolveReturns in lib/bets.ts)
+ *   - returns in the patch: checked against the same rules (e.g. a win cannot pay more than stake x odds)
+ * Returns can only be set on a settled bet, and an already settled bet keeps its returns unless a new value is sent.
+ */
 export async function updateBet(sql: Sql, id: string, patch: BetPatch): Promise<UpdateResult> {
   const found = (await sql.query("select * from bets where id = $1", [id])) as Row[];
   const current = found[0];
@@ -307,14 +381,29 @@ export async function updateBet(sql: Sql, id: string, patch: BetPatch): Promise<
 
   const placedOdds = patch.placedOdds ?? toNum(current.placed_odds);
   const placedStake = patch.placedStake ?? toNum(current.placed_stake);
-  const isPlacedOrLater = nextStatus === "placed" || SETTLED.includes(nextStatus);
+  const settling = isSettledStatus(nextStatus);
+  const isPlacedOrLater = nextStatus === "placed" || settling;
   if (isPlacedOrLater && (placedOdds === undefined || placedStake === undefined)) {
     return { kind: "invalid", error: "placedOdds and placedStake are required once a bet is placed." };
   }
 
+  if (patch.returns !== undefined && !settling) {
+    return { kind: "invalid_input", error: "returns can only be set when a bet is settled." };
+  }
+
+  // Returns are written when the bet settles, or when a settled bet's returns are corrected.
+  let returns: number | null = null;
+  if (isSettledStatus(nextStatus) && placedOdds !== undefined && placedStake !== undefined) {
+    if (nextStatus !== currentStatus || patch.returns !== undefined) {
+      const resolved = resolveReturns({ status: nextStatus, placedStake, placedOdds, override: patch.returns });
+      if (!resolved.ok) return { kind: "invalid_input", error: resolved.error };
+      returns = resolved.value;
+    }
+  }
+
   const now = new Date().toISOString();
   const placedAt = patch.placedAt ?? (nextStatus === "placed" && !current.placed_at ? now : null);
-  const settledAt = patch.settledAt ?? (SETTLED.includes(nextStatus) && !current.settled_at ? now : null);
+  const settledAt = patch.settledAt ?? (settling && !current.settled_at ? now : null);
 
   // Conditional on the status we read, so a concurrent change yields a conflict instead of a silent overwrite.
   const rows = (await sql.query(
@@ -335,7 +424,7 @@ export async function updateBet(sql: Sql, id: string, patch: BetPatch): Promise<
       patch.placedStake ?? null,
       placedAt,
       settledAt,
-      patch.returns ?? null,
+      returns,
       String(current.status),
     ],
   )) as Row[];

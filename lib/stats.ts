@@ -1,26 +1,25 @@
 import type { Row, Sheet, Table } from "./data";
+import type { SettledStatus } from "./bets";
 
-// Pure statistics for the syndicate tracker. No file access here, so this module is safe to import
-// from server components, client components and plain Node scripts.
+// Pure statistics for the syndicate. No file access here, so this module is safe to import
+// from server components, client components and plain Node scripts (scripts/check-stats.mts).
 //
-// What the spreadsheet actually records (TWOL (New) sheet):
-//   - "Punts": each member's weekly returns (what their bets paid back into the pot), per week.
-//   - "Banked": each member's weekly banked amount (2.50 per member per week).
-//   - "Fines Paid" / "Overdue": per member, totals only (no dates).
-//   - "Overall paid" (the sheet's "Invested"): total money paid in by members.
-//   - "Intrest updated": interest added to the pot (a single figure).
-//   - "Overall" (the pot) = banked + punts + fines + interest. The sheet's own formula.
+// Two sources feed the figures:
+//   1. The spreadsheet (TWOL (New) sheet), imported into data/*.json. Weekly punts, banked, fines,
+//      interest and paid in, for weeks 1..N (N = weeks with banking recorded).
+//   2. Settled bets in the shared bet queue (Postgres). Only bets settled AFTER the spreadsheet's
+//      last week are included (see queueCutoff), so nothing is counted twice.
 //
-// What it does NOT record: individual bets, stakes, odds, markets, sports or bet types. So strike
-// rate, ROI per bet and any sport/market/bet-type breakdowns are not available from this data.
+// What the spreadsheet records: weekly totals per member, not individual bets.
+// The queue records per-bet stakes, odds and returns, so per-bet strike rate is available for queue bets only.
 //
-// Assumptions (stated on the dashboard):
-//   - Staked = paid in minus banked. Each member pays 5.00 a week: 2.50 banked, 2.50 staked.
-//     The sheet's own identity (Overall - Invested = punts + fines + interest - staked) supports this.
-//   - Week n starts on the "Starting Date" plus 7 * (n - 1) days.
+// Assumptions (confirmed by the leader, stated on the dashboard):
+//   - Each member pays 5.00 a week: 2.50 is banked and 2.50 is staked on bets, every week.
+//   - Week n starts on the "Starting Date" plus 7 * (n - 1) days (UTC).
 //   - Equal shares: every member pays the same amount, so each member's pot share is pot / members.
 
 const DAY_MS = 86_400_000;
+const WEEK_MS = 7 * DAY_MS;
 
 export type Tracker = {
   members: MemberData[];
@@ -47,12 +46,29 @@ export type MemberData = {
   leaderboardTotal: number | null;
 };
 
+/** A settled bet from the shared queue, with the figures needed for the tracker. Money in GBP. */
+export type SettledQueueBet = {
+  id: string;
+  event: string;
+  selection: string;
+  /** Who proposed the bet (free text). Matched to a member's first name for the Members page. */
+  proposedBy: string;
+  status: SettledStatus;
+  placedOdds: number;
+  placedStake: number;
+  /** Total paid back, stake included. Won = stake x odds, lost = 0, void = stake. */
+  returns: number;
+  settledAt: Date;
+};
+
 export type Stats = {
   members: number;
   weeks: number;
   paidIn: number;
   banked: number;
+  /** Punts from the spreadsheet plus queue returns. */
   punts: number;
+  /** Stakes: paid in minus banked (spreadsheet) plus queue stakes. */
   staked: number;
   fines: number;
   overdue: number;
@@ -60,14 +76,14 @@ export type Stats = {
   pot: number;
   target: number;
   progress: number;
-  /** Bet P&L: returns (punts) minus stakes. */
+  /** Bet P&L: punts minus stakes (spreadsheet and queue). */
   betPnl: number;
   betRoi: number;
   /** Overall P&L: pot minus paid in (includes fines and interest). */
   overallPnl: number;
   overallRoi: number;
   avgPotPerWeek: number;
-  /** Total weeks to reach target at the current average pot per week (includes weeks already played). */
+  /** Total weeks to reach target at the average pot per week (includes weeks already played). */
   totalWeeksToTarget: number;
   projectedDate: Date | null;
   /** Member-weeks with a non-zero return. Proxy only: the sheet has no bet-level results. */
@@ -75,6 +91,15 @@ export type Stats = {
   memberWeeks: number;
   bestPunt: number;
   bestWeek: number;
+  // Queue bets (already filtered to after the cut-off). Zero when there are none.
+  queueBets: number;
+  queueWon: number;
+  queueLost: number;
+  queueVoid: number;
+  queueStaked: number;
+  queueReturns: number;
+  /** won / (won + lost) for queue bets. Void bets are not counted. Null until a bet has won or lost. */
+  queueStrikeRate: number | null;
 };
 
 export type WeekPoint = {
@@ -100,7 +125,10 @@ export type MonthPoint = {
 
 export type MemberStat = {
   name: string;
+  /** Spreadsheet punts plus queue returns attributed to this member. */
   punts: number;
+  /** Queue returns attributed to this member (included in punts). */
+  queueReturns: number;
   puntsShare: number;
   weeksWithReturn: number;
   bestPunt: number;
@@ -111,6 +139,27 @@ export type MemberStat = {
   potShare: number;
   /** Equal-share P&L: pot share minus paid-in share. */
   pnl: number;
+};
+
+export const OTHER_PROPOSER = "Other";
+
+/** Queue bets grouped by who proposed them. Names are matched to members case-insensitively. */
+export type QueueAttribution = {
+  name: string;
+  bets: number;
+  won: number;
+  lost: number;
+  void: number;
+  staked: number;
+  returns: number;
+};
+
+export type CumulativePoint = {
+  x: string;
+  /** Cumulative bet P&L after this point. */
+  cum: number;
+  week?: WeekPoint;
+  bet?: SettledQueueBet;
 };
 
 export type Check = { label: string; app: number; sheet: number; ok: boolean };
@@ -209,7 +258,7 @@ export function parseTracker(sheet: Sheet | null): Tracker | null {
 
 function weekStart(t: Tracker, week: number): Date | null {
   if (!t.startDate) return null;
-  return new Date(t.startDate.getTime() + (week - 1) * 7 * DAY_MS);
+  return new Date(t.startDate.getTime() + (week - 1) * WEEK_MS);
 }
 
 function monthKey(d: Date | null): string | null {
@@ -217,28 +266,108 @@ function monthKey(d: Date | null): string | null {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
-/** Totals and KPIs. Returns null if the paid-in figure is missing from the sheet. */
-export function computeStats(t: Tracker): Stats | null {
+// ---------- queue bets: cut-off and filtering ----------
+
+/**
+ * The cut-off: Starting Date + 7 x weeks played, i.e. the first instant after the spreadsheet's last week.
+ * A queue bet feeds the figures only if it was settled at or after this instant. Bets settled before it
+ * are already in the spreadsheet (or were never meant to count), so they must not be counted again.
+ * Re-importing a later spreadsheet moves this forward automatically.
+ */
+export function queueCutoff(t: Tracker): Date | null {
+  if (!t.startDate) return null;
+  return new Date(t.startDate.getTime() + t.weekNumbers.length * WEEK_MS);
+}
+
+/** The last day covered by the spreadsheet (the day before the cut-off). Used in the dashboard wording. */
+export function lastSpreadsheetDay(t: Tracker): Date | null {
+  const cutoff = queueCutoff(t);
+  return cutoff ? new Date(cutoff.getTime() - DAY_MS) : null;
+}
+
+/** Settled queue bets that feed the figures: settled at or after the cut-off, oldest first. */
+export function includedQueueBets(t: Tracker, bets: SettledQueueBet[]): SettledQueueBet[] {
+  const cutoff = queueCutoff(t);
+  if (!cutoff) return [];
+  return bets
+    .filter((b) => b.settledAt.getTime() >= cutoff.getTime())
+    .sort((a, b) => a.settledAt.getTime() - b.settledAt.getTime());
+}
+
+/** The most recently settled bets, newest first. */
+export function recentSettled(bets: SettledQueueBet[], n = 10): SettledQueueBet[] {
+  return [...bets].sort((a, b) => b.settledAt.getTime() - a.settledAt.getTime()).slice(0, n);
+}
+
+/**
+ * Queue bets grouped by proposer. Each proposer is matched to a member name from the sheet, case-insensitively.
+ * Members with no bets appear with zeros. Bets from anyone else go under "Other" (only listed if there are some).
+ */
+export function queueByProposer(t: Tracker, bets: SettledQueueBet[]): QueueAttribution[] {
+  const memberByKey = new Map(t.members.map((m) => [m.name.trim().toLowerCase(), m.name]));
+  const blank = (name: string): QueueAttribution => ({ name, bets: 0, won: 0, lost: 0, void: 0, staked: 0, returns: 0 });
+  const rows = new Map<string, QueueAttribution>(t.members.map((m) => [m.name, blank(m.name)]));
+  for (const b of bets) {
+    const name = memberByKey.get(b.proposedBy.trim().toLowerCase()) ?? OTHER_PROPOSER;
+    const row = rows.get(name) ?? blank(name);
+    rows.set(name, row);
+    row.bets += 1;
+    if (b.status === "settled_won") row.won += 1;
+    else if (b.status === "settled_lost") row.lost += 1;
+    else row.void += 1;
+    row.staked += b.placedStake;
+    row.returns += b.returns;
+  }
+  return [...rows.values()].filter((r) => r.name !== OTHER_PROPOSER || r.bets > 0);
+}
+
+// ---------- totals ----------
+
+/**
+ * Totals and KPIs. `queue` must already be filtered with includedQueueBets. Pass [] for spreadsheet-only figures.
+ * Returns null if the paid-in figure or the target is missing from the sheet.
+ *
+ * Pot formula (the sheet's own, extended for queue bets):
+ *   pot = banked + punts + fines + interest
+ *       = paidIn - staked + punts + fines + interest     (because banked = paidIn - staked, sheet identity)
+ * With queue bets, punts = sheetPunts + queueReturns and staked = (paidIn - banked) + queueStakes, so
+ *   pot = sheetPot + queueReturns - queueStakes
+ * That is, each queue bet moves the pot by returns - stake: its stake leaves the pot when placed, and its
+ * returns come back into it when it settles. Overall P&L = pot - paidIn = betPnl + fines + interest still holds.
+ *
+ * Average pot per week and the projected date use the spreadsheet's pot and weeks, so they describe the
+ * spreadsheet's pace. Progress to target uses the full pot.
+ */
+export function computeStats(t: Tracker, queue: SettledQueueBet[] = []): Stats | null {
   if (t.paidIn === null || t.target === null) return null;
   const weeks = t.weekNumbers.length;
   const members = t.members.length;
   const weekIdx = Array.from({ length: weeks }, (_, i) => i);
 
-  const punts = t.members.reduce((s, m) => s + m.punts.reduce((a, b) => a + b, 0), 0);
+  const sheetPunts = t.members.reduce((s, m) => s + m.punts.reduce((a, b) => a + b, 0), 0);
   const banked = t.members.reduce((s, m) => s + m.banked.reduce((a, b) => a + b, 0), 0);
   const fines = t.members.reduce((s, m) => s + m.fines, 0);
   const overdue = t.members.reduce((s, m) => s + m.overdue, 0);
   const interest = t.summary.get("Intrest updated") ?? 0;
-  const pot = banked + punts + fines + interest;
   const paidIn = t.paidIn;
-  const staked = paidIn - banked;
+
+  const queueStaked = queue.reduce((s, b) => s + b.placedStake, 0);
+  const queueReturns = queue.reduce((s, b) => s + b.returns, 0);
+  const queueWon = queue.filter((b) => b.status === "settled_won").length;
+  const queueLost = queue.filter((b) => b.status === "settled_lost").length;
+  const queueVoid = queue.filter((b) => b.status === "settled_void").length;
+
+  const punts = sheetPunts + queueReturns;
+  const staked = paidIn - banked + queueStaked;
+  const pot = banked + punts + fines + interest - queueStaked;
+  const sheetPot = banked + sheetPunts + fines + interest;
   const betPnl = punts - staked;
   const overallPnl = pot - paidIn;
-  const avgPotPerWeek = weeks ? pot / weeks : 0;
+  const avgPotPerWeek = weeks ? sheetPot / weeks : 0;
   const totalWeeksToTarget = avgPotPerWeek ? t.target / avgPotPerWeek : 0;
   const projectedDate =
     t.startDate && totalWeeksToTarget
-      ? new Date(Math.floor(t.startDate.getTime() + totalWeeksToTarget * 7 * DAY_MS))
+      ? new Date(Math.floor(t.startDate.getTime() + totalWeeksToTarget * WEEK_MS))
       : null;
 
   let memberWeeksWithReturn = 0;
@@ -254,6 +383,7 @@ export function computeStats(t: Tracker): Stats | null {
     ...weekIdx.map((i) => t.members.reduce((s, m) => s + num(m.punts[i]), 0)),
   );
 
+  const decided = queueWon + queueLost;
   return {
     members,
     weeks,
@@ -278,10 +408,19 @@ export function computeStats(t: Tracker): Stats | null {
     memberWeeks: members * weeks,
     bestPunt,
     bestWeek,
+    queueBets: queue.length,
+    queueWon,
+    queueLost,
+    queueVoid,
+    queueStaked,
+    queueReturns,
+    queueStrikeRate: decided ? queueWon / decided : null,
   };
 }
 
-/** One point per played week, with cumulative bet P&L. */
+// ---------- series and breakdowns ----------
+
+/** One point per played week, with cumulative bet P&L (spreadsheet only). */
 export function weeklySeries(t: Tracker, s: Stats): WeekPoint[] {
   const paidInPerWeek = s.weeks ? s.paidIn / s.weeks : 0;
   let cum = 0;
@@ -296,46 +435,72 @@ export function weeklySeries(t: Tracker, s: Stats): WeekPoint[] {
   });
 }
 
-/** Weekly points grouped by calendar month of the week start. */
-export function monthlySeries(weeks: WeekPoint[]): MonthPoint[] {
+/**
+ * Cumulative bet P&L: one point per spreadsheet week, then one point per included queue bet in settled order.
+ * Each queue bet adds returns - stake. The last point equals computeStats().betPnl.
+ */
+export function cumulativeSeries(weeks: WeekPoint[], queue: SettledQueueBet[]): CumulativePoint[] {
+  const points: CumulativePoint[] = weeks.map((w) => ({ x: `Wk ${w.week}`, cum: w.cumBetPnl, week: w }));
+  let cum = weeks.at(-1)?.cumBetPnl ?? 0;
+  const ordered = [...queue].sort((a, b) => a.settledAt.getTime() - b.settledAt.getTime());
+  ordered.forEach((bet, i) => {
+    cum += bet.returns - bet.placedStake;
+    points.push({ x: `Bet ${i + 1}`, cum, bet });
+  });
+  return points;
+}
+
+/** Weekly points grouped by calendar month. Queue bets are grouped by the month they settled in. */
+export function monthlySeries(weeks: WeekPoint[], queue: SettledQueueBet[] = []): MonthPoint[] {
   const byMonth = new Map<string, MonthPoint>();
+  const monthFor = (key: string): MonthPoint => {
+    const existing = byMonth.get(key);
+    if (existing) return existing;
+    const created: MonthPoint = {
+      month: key,
+      label: new Date(`${key}-01T00:00:00Z`).toLocaleDateString("en-GB", { month: "short", year: "numeric", timeZone: "UTC" }),
+      weeks: 0,
+      punts: 0,
+      staked: 0,
+      betPnl: 0,
+    };
+    byMonth.set(key, created);
+    return created;
+  };
   for (const w of weeks) {
     if (!w.month) continue;
-    const m =
-      byMonth.get(w.month) ??
-      {
-        month: w.month,
-        label: new Date(`${w.month}-01T00:00:00Z`).toLocaleDateString("en-GB", {
-          month: "short",
-          year: "numeric",
-          timeZone: "UTC",
-        }),
-        weeks: 0,
-        punts: 0,
-        staked: 0,
-        betPnl: 0,
-      };
+    const m = monthFor(w.month);
     m.weeks += 1;
     m.punts += w.punts;
     m.staked += w.staked;
     m.betPnl += w.betPnl;
-    byMonth.set(w.month, m);
+  }
+  for (const b of queue) {
+    const key = monthKey(b.settledAt);
+    if (!key) continue;
+    const m = monthFor(key);
+    m.punts += b.returns;
+    m.staked += b.placedStake;
+    m.betPnl += b.returns - b.placedStake;
   }
   return [...byMonth.values()].sort((a, b) => a.month.localeCompare(b.month));
 }
 
 /** Per-member figures. Pot share and paid-in share are equal (every member pays the same). */
-export function memberStats(t: Tracker, s: Stats): MemberStat[] {
+export function memberStats(t: Tracker, s: Stats, queue: SettledQueueBet[] = []): MemberStat[] {
   const potShare = s.members ? s.pot / s.members : 0;
   const paidShare = s.members ? s.paidIn / s.members : 0;
+  const attributed = new Map(queueByProposer(t, queue).map((a) => [a.name, a.returns]));
   return t.members
     .map((m) => {
-      const punts = m.punts.reduce((a, b) => a + b, 0);
+      const sheetPunts = m.punts.reduce((a, b) => a + b, 0);
+      const queueReturns = attributed.get(m.name) ?? 0;
       const banked = m.banked.reduce((a, b) => a + b, 0);
       return {
         name: m.name,
-        punts,
-        puntsShare: s.punts ? punts / s.punts : 0,
+        punts: sheetPunts + queueReturns,
+        queueReturns,
+        puntsShare: s.punts ? (sheetPunts + queueReturns) / s.punts : 0,
         weeksWithReturn: m.punts.filter((p) => p > 0).length,
         bestPunt: Math.max(0, ...m.punts),
         fines: m.fines,
@@ -349,7 +514,7 @@ export function memberStats(t: Tracker, s: Stats): MemberStat[] {
     .sort((a, b) => b.punts - a.punts);
 }
 
-/** Compares our totals with the spreadsheet's own cells. Only rows where the sheet has a value are included. */
+/** Compares our totals with the spreadsheet's own cells. Pass the spreadsheet-only stats (computeStats(t)). */
 export function reconcile(t: Tracker, s: Stats): Check[] {
   const pairs: { label: string; app: number; sheet: number | undefined }[] = [
     { label: "Total punts (Total Punts)", app: s.punts, sheet: t.summary.get("Total Punts") },
